@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildReadingRange,
+  createRangeReader,
   findAllAnchors,
   findAnchor,
   normalizeWhitespace,
@@ -119,6 +120,59 @@ test("image-only pages are skipped with a readable error", () => {
   );
   assert.equal(info.ok, false);
   assert.match(info.error, /No selectable text/);
+});
+
+test("pages can arrive one at a time while the range is being read", () => {
+  const range = createRangeReader({ startWord: "plot", endWord: "everything" });
+
+  range.addPage(2, "Chapter two\nHere the plot thickens considerably.\n");
+  assert.equal(range.begin(), true, "start word is on the page just added");
+  assert.equal(range.done, false);
+  const first = range.takeChunks();
+  // Text before the start word is never spoken.
+  assert.equal(first[0].start, range.startOffset);
+  assert.doesNotMatch(first[0].text, /Chapter two/);
+  assert.equal(first.map((c) => c.text).join(" "), "plot thickens considerably.");
+  assert.equal(range.startMatch.pageNumber, 2);
+
+  // Nothing new yet, so nothing more to say.
+  assert.deepEqual(range.takeChunks(), []);
+
+  range.addPage(3, "Conclusion\nIn conclusion, everything ends well. More text.");
+  assert.equal(range.resolveEnd(), true);
+  assert.equal(range.done, true);
+  const second = range.takeChunks();
+  const joined = second.map((c) => c.text).join(" ");
+  assert.match(joined, /Conclusion In conclusion, everything$/);
+  assert.doesNotMatch(joined, /ends well|More text/, "reading stops at the end word");
+  assert.equal(range.endMatch.pageNumber, 3);
+  assert.deepEqual(range.takeChunks(), [], "chunks are only handed out once");
+});
+
+test("the incremental reader agrees with the all-at-once builder", () => {
+  const options = { startPage: 1, endPage: 3, startWord: "chapter two", endWord: "ends well" };
+  const bulk = buildReadingRange(PAGES, options);
+
+  // Same pages, but handed over one by one with chunks drained in between,
+  // exactly as the viewer does while the voice is speaking.
+  const range = createRangeReader(options);
+  const chunks = [];
+  for (const page of PAGES) {
+    range.addPage(page.pageNumber, page.raw);
+    range.begin();
+    range.resolveEnd();
+    chunks.push(...range.takeChunks());
+  }
+
+  assert.equal(range.text(), bulk.text);
+  assert.equal(range.startMatch.pageNumber, bulk.startMatch.pageNumber);
+  assert.equal(range.startMatch.offset, bulk.startMatch.offset);
+  assert.equal(range.endMatch.pageNumber, bulk.endMatch.pageNumber);
+  assert.equal(chunks.map((c) => c.text).join(" "), bulk.text);
+  assert.deepEqual(
+    range.segments.map((s) => s.pageNumber),
+    bulk.segments.map((s) => s.pageNumber),
+  );
 });
 
 test("chunks stay under the limit, never split words, and keep offsets usable", () => {

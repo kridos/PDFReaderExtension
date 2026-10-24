@@ -75,6 +75,143 @@ function findAllAnchors(text, query) {
 }
 
 /**
+ * Build a reading range as pages arrive. The viewer feeds this one page at a
+ * time so a long PDF can start playing after the first page instead of waiting
+ * for every page in the range to be parsed; `buildReadingRange` is the same
+ * code handed all its pages at once.
+ *
+ * @param {{startWord?: string, endWord?: string}} [opts]
+ */
+function createRangeReader({ startWord, endWord } = {}) {
+  const startQuery = normalizeQuery(startWord);
+  const endQuery = normalizeQuery(endWord);
+  const segments = [];
+  let full = "";
+  let from = -1;
+  let emitted = 0;
+  let endAt = -1;
+  let closed = false;
+
+  function pageAt(offset) {
+    for (const seg of segments) {
+      if (offset >= seg.start && offset < seg.end) return seg;
+    }
+    // Offset landed on a page separator space or past the last character.
+    let chosen = segments[0];
+    for (const seg of segments) {
+      if (seg.start <= offset && seg.end > seg.start) chosen = seg;
+    }
+    return chosen ?? segments[segments.length - 1];
+  }
+
+  function endBound() {
+    return endAt >= 0 ? endAt + endQuery.length : full.length;
+  }
+
+  const range = {
+    /** Append one page's raw pdf.js text. Pages must arrive in reading order. */
+    addPage(pageNumber, raw) {
+      const { text, map } = normalizeWhitespace(raw ?? "");
+      if (!text) {
+        segments.push({ pageNumber, start: full.length, end: full.length, map });
+        return;
+      }
+      if (full.length) full += " ";
+      const start = full.length;
+      segments.push({ pageNumber, start, end: start + text.length, map });
+      full += text;
+    },
+
+    /**
+     * Fix where reading begins. Stays false while the start word has not
+     * appeared in the pages added so far.
+     */
+    begin() {
+      if (from >= 0) return true;
+      const idx = startQuery ? findAnchor(full, startQuery) : full.trim() ? 0 : -1;
+      if (idx === -1) return false;
+      from = idx;
+      emitted = idx;
+      return true;
+    },
+
+    /** True once the end word has been found at or after the start point. */
+    resolveEnd() {
+      if (endAt >= 0) return true;
+      if (!endQuery || from < 0) return false;
+      const at = findAnchor(full, endQuery, from);
+      if (at !== -1) endAt = at;
+      return endAt >= 0;
+    },
+
+    /**
+     * Chunks for text added since the last call. Stops at the end word, so
+     * nothing past it is ever handed to the reader.
+     */
+    takeChunks(maxLen = 280) {
+      if (from < 0 || closed) return [];
+      let to = full.length;
+      if (range.resolveEnd()) {
+        to = endAt + endQuery.length;
+        closed = true;
+      }
+      if (to <= emitted) return [];
+      const chunks = splitIntoChunks(full.slice(emitted, to), maxLen).map((chunk) => ({
+        start: chunk.start + emitted,
+        end: chunk.end + emitted,
+        text: chunk.text,
+      }));
+      emitted = to;
+      return chunks;
+    },
+
+    /** Whole range text available so far (useful for word counts). */
+    text() {
+      return from < 0 ? "" : full.slice(from, endBound()).trim();
+    },
+
+    wordCount() {
+      const text = range.text();
+      return text ? text.split(/\s+/).filter(Boolean).length : 0;
+    },
+
+    /** How many times an anchor appears in the pages loaded so far. */
+    hits(query) {
+      const needle = normalizeQuery(query);
+      return needle ? findAllAnchors(full, needle).length : 0;
+    },
+
+    get started() {
+      return from >= 0;
+    },
+    /** True once the end word has been reached: nothing more should be read. */
+    get done() {
+      return closed || endAt >= 0;
+    },
+    get full() {
+      return full;
+    },
+    get segments() {
+      return segments;
+    },
+    get startOffset() {
+      return Math.max(0, from);
+    },
+    get endOffset() {
+      return Math.max(0, endBound());
+    },
+    get startMatch() {
+      return from >= 0 && startQuery ? { pageNumber: pageAt(from).pageNumber, offset: from } : undefined;
+    },
+    get endMatch() {
+      return endAt >= 0 ? { pageNumber: pageAt(endAt).pageNumber, offset: endAt } : undefined;
+    },
+  };
+
+  return range;
+}
+
+/**
  * Build the text that should be read for a page range with optional word
  * anchors.
  *
@@ -119,87 +256,51 @@ function buildReadingRange(pages, opts = {}) {
     return { ...empty, error: `The start page (${startPage}) is after the end page (${endPage}).` };
   }
 
-  // Collapse each page and glue the pages together with single spaces.
-  const parts = [];
-  const segments = [];
-  let cursor = 0;
+  const range = createRangeReader({ startWord, endWord });
   for (let n = startPage; n <= endPage; n++) {
-    const page = byNumber.get(n);
-    const { text, map } = normalizeWhitespace(page?.raw ?? "");
-    if (!text) {
-      segments.push({ pageNumber: n, start: cursor, end: cursor, map });
-      continue;
-    }
-    if (cursor > 0) {
-      parts.push(" ");
-      cursor += 1;
-    }
-    segments.push({ pageNumber: n, start: cursor, end: cursor + text.length, map });
-    parts.push(text);
-    cursor += text.length;
+    range.addPage(n, byNumber.get(n)?.raw ?? "");
   }
-  const full = parts.join("");
 
-  if (!full.trim()) {
+  if (!range.full.trim()) {
     return { ...empty, error: `No selectable text was found on pages ${startPage}–${endPage}.` };
   }
-
-  const startHits = findAllAnchors(full, startWord);
-  const startIndex = startWord ? (startHits[0] ?? -1) : 0;
-  if (startWord && startIndex === -1) {
+  if (!range.begin()) {
     return {
       ...empty,
       startHits: 0,
       error: `Start word “${startWord}” was not found on pages ${startPage}–${endPage}.`,
     };
   }
-
-  const endHits = findAllAnchors(full, endWord);
-  const endIndex = endWord ? endHits.find((i) => i >= startIndex) : -1;
-  if (endWord && endIndex === undefined) {
+  if (endWord && !range.resolveEnd()) {
     return {
       ...empty,
-      startHits: startHits.length,
+      startHits: range.hits(startWord),
       error: `End word “${endWord}” does not appear after the start point on pages ${startPage}–${endPage}.`,
     };
   }
 
-  const from = startIndex;
-  const to = endWord ? endIndex + normalizeQuery(endWord).length : full.length;
-  const text = full.slice(from, to).trim();
+  const text = range.text();
   if (!text) {
     return {
       ...empty,
-      startHits: startHits.length,
-      endHits: endHits.length,
+      startHits: range.hits(startWord),
+      endHits: range.hits(endWord),
       error: "The start and end points are in the same place, so there is nothing to read.",
     };
   }
 
-  const pageAt = (offset) => {
-    for (const seg of segments) {
-      if (offset >= seg.start && offset < seg.end) return seg;
-    }
-    // Offset landed on a page separator space or past the last character.
-    let chosen = segments[0];
-    for (const seg of segments) {
-      if (seg.start <= offset && seg.end > seg.start) chosen = seg;
-    }
-    return chosen ?? segments[segments.length - 1];
-  };
-
   return {
     ok: true,
     text,
-    segments,
+    segments: range.segments,
     startPage,
     endPage,
-    startOffset: from,
-    endOffset: to,
-    startHits: startHits.length,
-    endHits: endHits.length,
-    startMatch: startWord ? { pageNumber: pageAt(startIndex).pageNumber, offset: startIndex } : undefined,
-    endMatch: endWord ? { pageNumber: pageAt(endIndex).pageNumber, offset: endIndex } : undefined,
+    startOffset: range.startOffset,
+    endOffset: range.endOffset,
+    startHits: range.hits(startWord),
+    endHits: range.hits(endWord),
+    startMatch: range.startMatch,
+    endMatch: range.endMatch,
   };
 }
 
@@ -271,5 +372,13 @@ function splitIntoChunks(text, maxLen = 280) {
   return chunks.filter((c) => /\S/.test(c.text));
 }
 
-  NS.range = { normalizeWhitespace, normalizeQuery, findAnchor, findAllAnchors, buildReadingRange, splitIntoChunks };
+  NS.range = {
+    normalizeWhitespace,
+    normalizeQuery,
+    findAnchor,
+    findAllAnchors,
+    createRangeReader,
+    buildReadingRange,
+    splitIntoChunks,
+  };
 })(globalThis);

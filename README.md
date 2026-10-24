@@ -14,7 +14,7 @@ rearrange pages and save a new copy.
 - **No build step** — the extension loads unpacked as-is; pdf.js and pdf-lib are
   vendored in `src/vendor/`.
 
-Status: version 0.1.0, in development. All automated suites pass (25 unit / 2
+Status: version 0.1.0, in development. All automated suites pass (27 unit / 3
 viewer / 2 extension tests — see [Testing](#testing)).
 
 ## Contents
@@ -76,10 +76,23 @@ Open a PDF, then use the **Read aloud** panel on the right:
   so the anchor stays inside the range.
 
 Matching is case-insensitive and ignores line breaks, so `the river was cold`
-still matches when the PDF wraps it. The status line under the fields reports the
-word count, an estimated duration, and which page each anchor matched — a
-surprising match is visible before you press **Read range**. Missing anchors
-produce an explicit message instead of a silently different range.
+still matches when the PDF wraps it. The status line under the fields reports
+which page each anchor matched, and with an end word it also reports the word
+count and an estimated duration — a surprising match is visible before you press
+**Read range**. Missing anchors produce an explicit message instead of a silently
+different range.
+
+**Pages are read in as they are needed.** Nothing is parsed beyond the page you
+are looking at until you press **Read range**: the viewer then reads the start
+page, begins speaking, and parses the next page while the voice is still working
+through the current one, keeping a few sentences queued ahead. A 400-page range
+therefore starts talking almost immediately instead of after every page has been
+extracted, and an end word thousands of pages in costs nothing until reading
+reaches it. The status line shows `Reading · 4 of 40 pages loaded` as it goes,
+and the per-page word cache means a page that has been read once (by reading or
+by paging through it) is instant afterwards. Because of this, a range with no end
+word has no up-front duration estimate; the real word count appears in the status
+line when the reading finishes.
 
 While reading, the current word is highlighted in the page text and the viewer
 turns pages automatically. The **Reading** list shows the sentences as they are
@@ -189,7 +202,8 @@ src/lib/pdftext.js          pdf.js text extraction with offsets
 src/lib/exporter.js         pdf-lib export of page order, rotation, annotations
 src/lib/settings.js         chrome.storage settings with localStorage fallback
 src/content/page-reader.js  injected page reader: extraction, highlight, panel
-src/lib/range.core.js       page range + word anchors + sentence chunking
+src/lib/range.core.js       page range + word anchors + sentence chunking; also
+                            the incremental reader the viewer feeds page by page
 src/lib/reader.core.js      speechSynthesis queue with word boundary events
 src/lib/range.js            ES module wrapper around range.core.js
 src/lib/reader.js           ES module wrapper around reader.core.js
@@ -210,6 +224,15 @@ word to highlight.
 or non-content elements, and records a text node plus start offset for every run
 it appends. Highlighting maps a word offset back to those nodes and applies a
 `Range` through `CSS.highlights`, so the page is restyled without being rewritten.
+
+**Lazy pages.** `createRangeReader` in `range.core.js` accumulates one page at a
+
+time, reports where the start anchor landed, and hands out speech chunks for
+whatever text has arrived so far — stopping exactly at the end anchor. The viewer
+pulls pages from `getPageTextData` only when the speech queue runs low, and the
+queue (`reader.core.js` with `open`/`append`/`close`) waits for the next batch
+instead of ending. `buildReadingRange` is the same accumulator fed every page at
+once, which is what the web page reader and the unit tests use.
 
 **Shared reading logic.** Range building and the speech queue live in
 `*.core.js` files that attach to `globalThis.__PDFREADER__`. Extension pages load
@@ -233,24 +256,30 @@ Minimal containers may need extra shared libraries and a fontconfig file; see
 ### Automated
 
 ```bash
-npm test                # 25 tests: pure logic + real PDF bytes (Node only)
-npm run test:browser    # 2 tests: the viewer page and the settings page
+npm test                # 27 tests: pure logic + real PDF bytes (Node only)
+npm run test:browser    # 3 tests: the viewer page and the settings page
 npm run test:extension  # 2 tests: the loaded extension, PDFs and web pages
 ```
 
 - **`npm test`** (`tests/range.test.mjs`, `pdftext.test.mjs`, `pdf.test.mjs`)
   covers whitespace normalisation and offset maps, case-insensitive anchor
   search, range errors (missing anchor, inverted pages, empty text), sentence
-  chunking and its offsets, text-run joining, and the exporter against real PDF
-  bytes: page order, added rotation, annotation coordinates, annotation text, and
-  WinAnsi sanitising.
+  chunking and its offsets, ranges fed one page at a time (it agrees with the
+  all-at-once builder, stops at the end word and never repeats a chunk), text-run
+  joining, and the exporter against real PDF bytes: page order, added rotation,
+  annotation coordinates, annotation text, and WinAnsi sanitising.
 - **`npm run test:browser`** (`tests/browser.test.mjs`) drives `src/viewer.html` in
   Chromium: renders a 3-page PDF, checks the text layer and zoom shortcuts,
   resolves a word-anchored range, verifies reading starts at the anchor and stops
   at the end anchor (with a stubbed synthesiser), observes automated page turning,
   creates a highlight and an ink stroke, deletes a page, then downloads the saved
-  PDF and re-parses it to confirm the result. A second test covers the empty state
-  and the settings page.
+  PDF and re-parses it to confirm the result. It also records every word the
+  viewer marks as spoken, so the highlight is checked against the text and the
+  page it belongs to. A second test opens a 30-page PDF and reads the whole
+  document: it records each status line and asserts reading started when only the
+  first page had been parsed, that the loaded-page count climbs to 30, and that
+  every page was spoken exactly once. A third test covers the empty state and the
+  settings page.
 - **`npm run test:extension`** (`tests/extension.test.mjs`) loads the unpacked
   extension in full Chromium and checks the redirect rule and settings toggle,
   opens a `.pdf` URL and an extension-less PDF URL into the viewer, then injects
@@ -268,9 +297,11 @@ Automated tests cannot click the toolbar icon or hear audio, so check these once
 after loading unpacked:
 
 1. Click a `.pdf` link: the viewer opens and renders the first page.
-2. Enter a start page, end page, start word and end word: the status line shows a
-   plausible word count, and **Read range** highlights the current word and turns
-   pages. **Stop** ends it.
+2. Enter a start page, end page, start word and end word: the status line shows
+   the anchor pages (and a word count when an end word is set), and **Read range**
+   starts speaking quickly, highlights the current word and turns pages. On a long
+   PDF the status line should read `Reading · N of M pages loaded` with a small N
+   rather than loading the whole range first. **Stop** ends it.
 3. Select a word in the PDF and press **Use selection**: the matching field fills
    and the page bound moves.
 4. Draw with Pen, add a Text box, highlight a selection, undo once, then

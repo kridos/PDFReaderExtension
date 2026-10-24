@@ -12,14 +12,19 @@ class Reader {
   }
 
   /**
-   * @param {{onState?: (state: string) => void, onProgress?: (p: {absolute: number, chunkIndex: number, chunk: {start: number, end: number, text: string}}) => void}} handlers
+   * @param {{onState?: (state: string) => void, onProgress?: (p: {absolute: number, chunkIndex: number, chunk: {start: number, end: number, text: string}}) => void, onStarved?: () => void}} handlers
    */
-  constructor({ onState, onProgress } = {}) {
+  constructor({ onState, onProgress, onStarved } = {}) {
     this.onState = onState ?? (() => {});
     this.onProgress = onProgress ?? (() => {});
+    // Called when playback catches up with chunks that have not been supplied
+    // yet; the caller can append more text and playback carries on.
+    this.onStarved = onStarved ?? (() => {});
     this.chunks = [];
     this.index = 0;
     this.state = "idle"; // idle | playing | paused | ended
+    // While open, running out of chunks means "wait for more" rather than "done".
+    this.open = false;
     this.rate = 1;
     this.pitch = 1;
     this.volume = 1;
@@ -27,6 +32,7 @@ class Reader {
     this._token = 0;
     this._current = null;
     this._keepAlive = [];
+    this._starved = false;
   }
 
   get voices() {
@@ -54,13 +60,36 @@ class Reader {
   }
 
   /**
-   * @param {{chunks: {start: number, end: number, text: string}[]}} range
+   * @param {{chunks?: {start: number, end: number, text: string}[], open?: boolean}} range
+   *   `open` keeps the queue alive when it runs dry, so chunks can be appended
+   *   while it is already speaking.
    */
-  load(range) {
+  load(range = {}) {
     this.stop();
     this.chunks = range.chunks ?? [];
+    this.open = Boolean(range.open);
     this.index = 0;
+    this._starved = false;
     this._setState("idle");
+  }
+
+  /** Add chunks to a queue that may already be playing. */
+  append(chunks) {
+    if (!chunks || !chunks.length) return;
+    this.chunks.push(...chunks);
+    // While paused the queue is only restarted by resume(); leaving the starved
+    // flag set lets resume() know there is nothing to un-pause yet.
+    if (!this._starved || this.state !== "playing") return;
+    this._starved = false;
+    this._speakCurrent();
+  }
+
+  /** No more chunks are coming: finish as soon as the queue drains. */
+  close() {
+    this.open = false;
+    if (!this._starved) return;
+    this._starved = false;
+    if (this.state === "playing") this._speakCurrent();
   }
 
   play() {
@@ -79,8 +108,14 @@ class Reader {
 
   resume() {
     if (!Reader.supported || this.state !== "paused") return;
-    window.speechSynthesis.resume();
     this._setState("playing");
+    // Nothing is actually paused if the queue ran dry while it was paused.
+    if (this._starved || this.index >= this.chunks.length) {
+      this._starved = false;
+      this._speakCurrent();
+      return;
+    }
+    window.speechSynthesis.resume();
   }
 
   toggle() {
@@ -92,6 +127,7 @@ class Reader {
   stop() {
     this._token++;
     this._current = null;
+    this._starved = false;
     this._keepAlive = [];
     if (Reader.supported) window.speechSynthesis.cancel();
     if (this.state !== "idle") this._setState("idle");
@@ -125,6 +161,12 @@ class Reader {
   _speakCurrent() {
     const token = this._token;
     if (this.index >= this.chunks.length) {
+      if (this.open) {
+        // Wait for the next page instead of declaring the reading finished.
+        this._starved = true;
+        this.onStarved();
+        return;
+      }
       this._setState("ended");
       return;
     }
@@ -161,10 +203,6 @@ class Reader {
     utter.onend = () => {
       if (token !== this._token) return;
       this.index++;
-      if (this.index >= this.chunks.length) {
-        this._setState("ended");
-        return;
-      }
       this._speakCurrent();
     };
 

@@ -1,6 +1,6 @@
 import * as pdfjs from "./vendor/pdfjs/pdf.mjs";
 import { buildPageText } from "./lib/pdftext.js";
-import { buildReadingRange, splitIntoChunks } from "./lib/range.js";
+import { createRangeReader, normalizeQuery } from "./lib/range.js";
 import { buildEditedPdf } from "./lib/exporter.js";
 import { Reader } from "./lib/reader.js";
 import { loadSettings, saveSettings } from "./lib/settings.js";
@@ -98,7 +98,10 @@ const reader = new Reader({
   onProgress: ({ absolute, chunkIndex }) => {
     followReading(absolute);
     updateTranscriptProgress(chunkIndex);
+    // Top up before the voice runs dry, so the next page is ready in time.
+    if (feed && reader.chunks.length - reader.index <= 1) void pumpReading();
   },
+  onStarved: () => void pumpReading(),
 });
 
 /* ------------------------------------------------------------------ */
@@ -172,7 +175,7 @@ function visibleToOriginal(visible) {
 }
 
 function teardownDocument() {
-  reader.stop();
+  stopReading();
   state.range = null;
   state.chunks = [];
   transcriptEls = [];
@@ -813,15 +816,112 @@ function movePage(fromVisible, toVisible) {
 /* Reading range                                                       */
 /* ------------------------------------------------------------------ */
 
-async function getRangePages(startVisible, endVisible) {
-  const pages = [];
-  for (let visible = startVisible; visible <= endVisible; visible++) {
-    const original = visibleToOriginal(visible);
-    if (!original) continue;
-    const data = await getPageTextData(original);
-    pages.push({ pageNumber: visible, raw: data.raw });
+/** How many chunks to keep queued ahead of the voice before pausing the page loading. */
+const READ_AHEAD_CHUNKS = 3;
+/** Beyond this the transcript list stops growing; the audio keeps going. */
+const TRANSCRIPT_LIMIT = 400;
+
+/** The range being read right now, or null. */
+let feed = null;
+let pumping = false;
+
+/**
+ * Reading range that pulls its text in one page at a time, so playback can
+ * start as soon as the first page is parsed instead of after the whole range.
+ */
+function createReadFeed(inputs, { preview = false } = {}) {
+  const range = createRangeReader({ startWord: inputs.startWord, endWord: inputs.endWord });
+  let nextPage = inputs.startPage;
+
+  const active = {
+    range,
+    inputs,
+    preview,
+    /** Pages still left to look at, ignoring the end word being found. */
+    get exhausted() {
+      return nextPage > inputs.endPage;
+    },
+    get span() {
+      return inputs.endPage - inputs.startPage + 1;
+    },
+    get loaded() {
+      return range.segments.length;
+    },
+    /** Parse the next page's text. False once the range has run out of pages. */
+    async loadNext() {
+      while (nextPage <= inputs.endPage) {
+        const visible = nextPage++;
+        const original = visibleToOriginal(visible);
+        if (!original) continue;
+        const data = await getPageTextData(original);
+        range.addPage(visible, data.raw);
+        return true;
+      }
+      return false;
+    },
+    /** Load pages until the start word shows up, or report why it did not. */
+    async resolveStart() {
+      for (;;) {
+        if (range.begin()) return { ok: true };
+        if (!(await active.loadNext())) {
+          return {
+            ok: false,
+            error: normalizeQuery(inputs.startWord)
+              ? `Start word “${normalizeQuery(inputs.startWord)}” was not found on pages ${inputs.startPage}–${inputs.endPage}.`
+              : `No selectable text was found on pages ${inputs.startPage}–${inputs.endPage}.`,
+          };
+        }
+        // A newer Read (or a new document) took over while this page loaded.
+        if (!preview && active !== feed) return { ok: false, error: "Reading was cancelled." };
+      }
+    },
+    /** Turn the newly loaded text into chunks and queue it for speech. */
+    emit() {
+      const chunks = range.takeChunks();
+      if (!chunks.length) return 0;
+      state.chunks.push(...chunks);
+      appendTranscript(chunks);
+      reader.append(chunks);
+      return chunks.length;
+    },
+  };
+  return active;
+}
+
+/** Keep the queue topped up while the voice is working through it. */
+async function pumpReading() {
+  const active = feed;
+  if (!active || pumping) return;
+  pumping = true;
+  try {
+    while (!active.range.done && reader.chunks.length - reader.index < READ_AHEAD_CHUNKS) {
+      if (!(await active.loadNext())) break;
+      if (active !== feed) return;
+      active.emit();
+      updateReadingStatus(active);
+    }
+    if (active !== feed) return;
+    if (active.range.done || active.exhausted) {
+      // Nothing more is coming: let the queue drain and report the result.
+      reader.close();
+      if (!active.finished) {
+        active.finished = true;
+        const r = active.range;
+        const words = r.wordCount();
+        setRangeStatus(
+          `Read ${active.loaded} of ${active.span} pages · ${words.toLocaleString()} words.`,
+          "ok",
+        );
+      }
+    }
+  } finally {
+    pumping = false;
   }
-  return pages;
+}
+
+function updateReadingStatus(active) {
+  if (active !== feed || active.finished) return;
+  setRangeStatus(`Reading · ${active.loaded} of ${active.span} pages loaded`);
 }
 
 function rangeInputs() {
@@ -874,15 +974,22 @@ function scheduleRangePreview() {
   previewTimer = setTimeout(updateRangePreview, 260);
 }
 
-function summary(info) {
-  const words = info.text.split(/\s+/).filter(Boolean).length;
+function previewSummary(range, inputs) {
+  const bits = [`Pages ${inputs.startPage}–${inputs.endPage}`];
+  if (range.startMatch) bits.push(`starts on page ${range.startMatch.pageNumber}`);
+  // Without an end word the range is fully described by its page numbers, and
+  // guessing a duration would mean parsing every page first — which is the cost
+  // this range is meant to avoid. The real word count appears once it is read.
+  if (!inputs.endWord.trim()) return bits.join(" · ");
+  if (!range.done) return null;
+  const words = range.wordCount();
   const minutes = words / (165 * (Number(state.settings.rate) || 1));
-  const time = minutes < 1 ? "under a minute" : `about ${Math.round(minutes)} min`;
-  const bits = [`Pages ${info.startPage}–${info.endPage}`, `${words.toLocaleString()} words`, time];
-  if (info.startMatch) bits.push(`starts on page ${info.startMatch.pageNumber}`);
-  if (info.endMatch) bits.push(`ends on page ${info.endMatch.pageNumber}`);
+  bits.push(`${words.toLocaleString()} words`, minutes < 1 ? "under a minute" : `about ${Math.round(minutes)} min`);
+  if (range.endMatch) bits.push(`ends on page ${range.endMatch.pageNumber}`);
   return bits.join(" · ");
-}async function updateRangePreview() {
+}
+
+async function updateRangePreview() {
   const seq = ++previewSeq;
   if (!state.doc) {
     setRangeStatus("Open a PDF to set a reading range.");
@@ -892,55 +999,95 @@ function summary(info) {
   const inputs = rangeInputs();
   const span = inputs.endPage - inputs.startPage + 1;
   if (span > 60) {
-    setRangeStatus(`Pages ${inputs.startPage}–${inputs.endPage}. Press “Read range” to load them.`);
+    setRangeStatus(`Pages ${inputs.startPage}–${inputs.endPage}. Press “Read range” to start reading them.`);
     ui.readRange.disabled = !Reader.supported;
     return;
   }
   setRangeStatus("Checking the range…");
-  const pages = await getRangePages(inputs.startPage, inputs.endPage);
+  const preview = createReadFeed(inputs, { preview: true });
+  const start = await preview.resolveStart();
   if (seq !== previewSeq) return; // A newer range was requested while loading.
-  const info = buildReadingRange(pages, { ...inputs, totalPages: state.pageOrder.length });
-  if (!info.ok) {
-      setRangeStatus(info.error, "error");
-      ui.readRange.disabled = true;
-      return;
+  if (!start.ok) {
+    setRangeStatus(start.error, "error");
+    ui.readRange.disabled = true;
+    return;
+  }
+  // An end word can be anywhere up to the last page, so look for it page by page
+  // and stop as soon as it turns up.
+  if (inputs.endWord.trim()) {
+    while (!preview.range.done && !preview.exhausted) {
+      if (!(await preview.loadNext())) break;
+      preview.range.resolveEnd();
+      if (seq !== previewSeq) return;
     }
-    setRangeStatus(summary(info), "ok");
+  }
+  const line = previewSummary(preview.range, inputs);
+  if (!line) {
+    setRangeStatus(
+      `End word “${normalizeQuery(inputs.endWord)}” does not appear after the start point on pages ${inputs.startPage}–${inputs.endPage}.`,
+      "error",
+    );
+    ui.readRange.disabled = true;
+    return;
+  }
+  setRangeStatus(line, "ok");
   ui.readRange.disabled = !Reader.supported;
+}
+
+/** Stop whatever is reading and forget the range being streamed. */
+function stopReading() {
+  feed = null;
+  reader.stop();
+  ui.playPause.textContent = "▶";
+  ui.stop.disabled = true;
 }
 
 async function startReading() {
   if (!state.doc) return;
   const inputs = rangeInputs();
-  setRangeStatus("Preparing the range…");
+  stopReading();
+  clearTranscript();
+  state.range = null;
+  state.chunks = [];
   ui.readRange.disabled = true;
-  try {
-    const pages = await getRangePages(inputs.startPage, inputs.endPage);
-    const info = buildReadingRange(pages, { ...inputs, totalPages: state.pageOrder.length });
-    if (!info.ok) {
-      setRangeStatus(info.error, "error");
-      return;
-    }
-    const chunks = splitIntoChunks(info.text, 280);
-    if (!chunks.length) {
-      setRangeStatus("There is nothing to read in that range.", "error");
-      return;
-    }
-    state.range = { ...info, baseOffset: info.startOffset };
-    state.chunks = chunks;
-    renderTranscript(chunks);
-    setRangeStatus(summary(info), "ok");
+  setRangeStatus("Looking for the start of the range…");
 
-    if (info.startMatch) {
-      await goToPage(info.startMatch.pageNumber);
+  const active = createReadFeed(inputs);
+  feed = active;
+  try {
+    const start = await active.resolveStart();
+    if (feed !== active) return;
+    if (!start.ok) {
+      setRangeStatus(start.error, "error");
+      return;
     }
 
     reader.rate = Number(state.settings.rate) || 1;
     reader.pitch = Number(state.settings.pitch) || 1;
     reader.voiceURI = state.settings.voiceURI || "";
-    reader.load({ ...info, chunks });
+    reader.load({ chunks: [], open: true });
+    // The page map grows as pages are parsed, so follow-along highlighting works
+    // for text that has not been looked at yet. Chunk offsets are absolute
+    // offsets into that text, the same space as `segments`.
+    state.range = {
+      segments: active.range.segments,
+      startPage: inputs.startPage,
+      endPage: inputs.endPage,
+    };
+    if (!active.emit()) {
+      reader.close();
+      setRangeStatus("There is nothing to read in that range.", "error");
+      return;
+    }
+    updateReadingStatus(active);
+
+    if (active.range.startMatch) {
+      await goToPage(active.range.startMatch.pageNumber);
+    }
+
     reader.play();
     ui.stop.disabled = false;
+    void pumpReading();
   } catch (error) {
     setRangeStatus(`Could not read: ${error.message}`, "error");
   } finally {
@@ -948,28 +1095,28 @@ async function startReading() {
   }
 }
 
-function renderTranscript(chunks) {
-  const limit = 400;
+function clearTranscript() {
   transcriptEls = [];
   ui.transcript.replaceChildren();
+  ui.progressLabel.textContent = "";
+}
+
+/** Add the newest chunks to the reading list as they arrive. */
+function appendTranscript(chunks) {
   const frag = document.createDocumentFragment();
-  chunks.slice(0, limit).forEach((chunk, index) => {
+  for (const chunk of chunks) {
+    if (transcriptEls.length >= TRANSCRIPT_LIMIT) break;
+    const index = transcriptEls.length;
     const p = document.createElement("p");
     p.className = "sentence";
     p.textContent = chunk.text;
     p.addEventListener("click", () => reader.seekToChunk(index));
     transcriptEls.push(p);
     frag.append(p);
-  });
-  if (chunks.length > limit) {
-    const p = document.createElement("p");
-    p.className = "muted small";
-    p.textContent = `…and ${chunks.length - limit} more sentences.`;
-    frag.append(p);
   }
   ui.transcript.append(frag);
-  ui.progressLabel.textContent = `0 / ${chunks.length}`;
 }
+
 
 function updateTranscriptProgress(chunkIndex) {
   transcriptEls.forEach((node, index) => node.classList.toggle("current", index === chunkIndex));
@@ -978,9 +1125,8 @@ function updateTranscriptProgress(chunkIndex) {
   if (chunkIndex >= 0) ui.progressLabel.textContent = `${chunkIndex + 1} / ${state.chunks.length}`;
 }
 
-function locateRangeOffset(absoluteInRangeText) {
+function locateRangeOffset(absolute) {
   if (!state.range) return null;
-  const absolute = state.range.baseOffset + absoluteInRangeText;
   const segments = state.range.segments ?? [];
   let segment = segments.find((s) => absolute >= s.start && absolute < s.end);
   if (!segment) {
@@ -1279,11 +1425,7 @@ function wireEvents() {
   }
 
   ui.readRange.addEventListener("click", startReading);
-  ui.stop.addEventListener("click", () => {
-    reader.stop();
-    ui.playPause.textContent = "▶";
-    ui.stop.disabled = true;
-  });
+  ui.stop.addEventListener("click", stopReading);
 
   ui.playPause.addEventListener("click", () => {
     if (reader.state === "playing" || reader.state === "paused") reader.toggle();
@@ -1356,7 +1498,7 @@ function wireEvents() {
   window.addEventListener("keydown", (event) => {
     const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName) || event.target.isContentEditable;
     if (event.key === "Escape") {
-      reader.stop();
+      stopReading();
       return;
     }
     if (typing) return;

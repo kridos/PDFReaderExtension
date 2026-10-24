@@ -44,6 +44,18 @@ async function makeSamplePdf() {
   return new Uint8Array(await doc.save());
 }
 
+/** A PDF long enough that parsing every page up front would be obvious. */
+async function makeLongPdf(pageCount = 30) {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  for (let n = 1; n <= pageCount; n++) {
+    const page = doc.addPage([612, 792]);
+    page.drawText(`Chapter ${n}`, { x: 72, y: 720, size: 18, font });
+    page.drawText(`Page ${n} marker opens the page.`, { x: 72, y: 690, size: 12, font });
+  }
+  return new Uint8Array(await doc.save());
+}
+
 async function startServer(sample) {
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://127.0.0.1");
@@ -70,7 +82,7 @@ async function startServer(sample) {
   return { server, origin: `http://127.0.0.1:${port}` };
 }
 
-const FAKE_TTS = () => {
+const FAKE_TTS = (wordDelay = 25) => {
   class FakeUtterance {
     constructor(text) {
       this.text = text;
@@ -116,7 +128,7 @@ const FAKE_TTS = () => {
         }
         utterance.onboundary?.({ name: "word", charIndex: positions[i] });
         i++;
-        setTimeout(step, 25);
+        setTimeout(step, wordDelay);
       };
       setTimeout(step, 0);
     },
@@ -194,6 +206,22 @@ test("viewer renders, reads a word-anchored range, annotates and saves", async (
   assert.match(status, /starts on page 2/);
 
   // ---- Reading follows along onto the next page ----
+  // Record every word the viewer marks as being spoken, so the highlight can be
+  // checked against the text, not just its existence.
+  await page.evaluate(() => {
+    window.__readWords = [];
+    new MutationObserver((records) => {
+      for (const record of records) {
+        const el = record.target;
+        if (record.attributeName !== "class" || !el.classList?.contains("reading")) continue;
+        window.__readWords.push({ page: document.querySelector("#pageInput")?.value, word: el.textContent });
+      }
+    }).observe(document.querySelector("#textLayer"), {
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["class"],
+    });
+  });
   await page.click("#btnReadRange");
   await page.waitForFunction(() => Boolean(document.querySelector("#textLayer .w.reading")), null, { timeout: 10000 });
   await page.waitForFunction(() => document.querySelector("#pageInput")?.value === "3", null, { timeout: 10000 });
@@ -207,6 +235,19 @@ test("viewer renders, reads a word-anchored range, annotates and saves", async (
   );
   assert.match(spoken, /^Beta marker appears here\./);
   assert.doesNotMatch(spoken, /Delta tail text/, "end word should stop the reading range");
+
+  // The highlighted word is the one being spoken, on the right page.
+  const readWords = await page.evaluate(() => window.__readWords);
+  assert.ok(readWords.length > 3, `only ${readWords.length} words were highlighted`);
+  assert.equal(readWords[0].word, "Beta", "highlight starts at the start anchor");
+  assert.ok(
+    readWords.every((entry) => !/Delta/.test(entry.word)),
+    `words past the end anchor were highlighted: ${JSON.stringify(readWords.filter((w) => /Delta/.test(w.word)))}`,
+  );
+  assert.ok(
+    readWords.every((entry) => entry.page === "2" || entry.page === "3"),
+    `highlight landed on the wrong page: ${JSON.stringify(readWords.filter((w) => !["2", "3"].includes(w.page)))}`,
+  );
   // The range may already have finished reading, disabling Stop mid-flight.
   await page.click("#btnStop", { timeout: 2000 }).catch(() => {});
 
@@ -298,6 +339,84 @@ test("viewer renders, reads a word-anchored range, annotates and saves", async (
   assert.match(text[1], /Chapter three/);
   assert.equal(text.some((chunk) => /Chapter two/.test(chunk)), false, "deleted page is gone");
 
+  assert.deepEqual(errors, [], `console errors: ${errors.join(" | ")}`);
+});
+
+test("a long PDF is parsed page by page while it reads", async (t) => {
+  const PAGES = 30;
+  const long = await makeLongPdf(PAGES);
+  const { server, origin } = await startServer(long);
+  const browser = await chromium.launch();
+  t.after(async () => {
+    await browser.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const context = await browser.newContext();
+  await context.addInitScript(FAKE_TTS, 12);
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (err) => errors.push(err.message));
+  page.on("console", (msg) => {
+    if (msg.type() === "error") errors.push(msg.text());
+  });
+
+  await page.goto(`${origin}/src/viewer.html?file=${origin}/sample.pdf`);
+  await page.waitForFunction(
+    (n) => document.querySelector("#pageTotal")?.textContent === String(n),
+    String(PAGES),
+    { timeout: 20000 },
+  );
+
+  // The whole document is the range: nothing to describe beyond "read it all".
+  await page.fill("#startPage", "1");
+  await page.fill("#endPage", String(PAGES));
+  await page.waitForFunction(() => /Pages 1–30/.test(document.querySelector("#rangeStatus")?.textContent ?? ""), null, {
+    timeout: 20000,
+  });
+
+  // Record every status line the panel shows, so the test does not have to win
+  // a race against the voice to see how many pages had been parsed.
+  await page.evaluate(() => {
+    const el = document.querySelector("#rangeStatus");
+    window.__statusLog = [el.textContent];
+    new MutationObserver(() => window.__statusLog.push(el.textContent)).observe(el, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+  });
+
+  await page.click("#btnReadRange");
+  await page.waitForFunction(() => /Page 30 marker/.test((window.__spoken ?? []).join(" ")), null, { timeout: 30000 });
+  await page.waitForFunction(() => /^Read /.test(document.querySelector("#rangeStatus")?.textContent ?? ""), null, {
+    timeout: 30000,
+  });
+
+  const statusLog = await page.evaluate(() => window.__statusLog);
+  const reading = statusLog
+    .map((line) => /Reading · (\d+) of (\d+) pages loaded/.exec(line ?? ""))
+    .filter(Boolean)
+    .map((m) => ({ loaded: Number(m[1]), total: Number(m[2]) }));
+  assert.ok(reading.length > 0, `no page-by-page progress reported: ${JSON.stringify(statusLog)}`);
+  assert.equal(reading[0].total, PAGES);
+  // Reading started after the first page, long before the rest were parsed.
+  assert.ok(
+    reading[0].loaded <= 3,
+    `reading only started after ${reading[0].loaded} pages had been parsed`,
+  );
+  // The count climbs as playback moves through the document.
+  for (let i = 1; i < reading.length; i++) {
+    assert.ok(reading[i].loaded >= reading[i - 1].loaded, "page progress went backwards");
+  }
+  assert.equal(reading.at(-1).loaded, PAGES, "every page in the range was eventually read");
+
+  const spoken = await page.evaluate(() => window.__spoken.join(" "));
+  for (let n = 1; n <= PAGES; n++) {
+    const hits = spoken.split(`Page ${n} marker`).length - 1;
+    assert.equal(hits, 1, `page ${n} was spoken ${hits} times`);
+  }
+  assert.match(await page.textContent("#rangeStatus"), new RegExp(`^Read ${PAGES} of ${PAGES} pages`));
   assert.deepEqual(errors, [], `console errors: ${errors.join(" | ")}`);
 });
 

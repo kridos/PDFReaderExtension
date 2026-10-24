@@ -7,6 +7,7 @@ const {
   normalizeQuery,
   findAnchor,
   findAllAnchors,
+  createRangeReader,
   buildReadingRange,
   splitIntoChunks,
 } = globalThis.__PDFREADER__.range;
@@ -16,6 +17,7 @@ export {
   normalizeQuery,
   findAnchor,
   findAllAnchors,
+  createRangeReader,
   buildReadingRange,
   splitIntoChunks,
 };
