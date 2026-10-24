@@ -1,0 +1,21 @@
+{
+  "name": "pdf-reader-extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Chrome extension to view, annotate and edit PDFs and read chosen page/word ranges aloud.",
+  "scripts": {
+    "test": "node --test tests/range.test.mjs tests/pdftext.test.mjs tests/pdf.test.mjs",
+    "test:browser": "node --test tests/browser.test.mjs",
+    "test:extension": "node --test tests/extension.test.mjs",
+    "icons": "node tools/make-icons.mjs",
+    "vendor": "node tools/vendor.mjs"
+  },
+  "dependencies": {
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^6.4.299"
+  },
+  "devDependencies": {
+    "playwright": "^1.64.1"
+  }
+}

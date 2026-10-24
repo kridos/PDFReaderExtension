@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>PDF Reader settings</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main>
+      <h1>PDF Reader settings</h1>
+
+      <section>
+        <h2>Opening PDFs</h2>
+        <label class="check">
+          <input id="autoOpenPdf" type="checkbox" />
+          <span>
+            Open PDF links in PDF Reader
+            <small>When off, Chrome's built-in viewer handles PDFs and you can still open files with the toolbar button.</small>
+          </span>
+        </label>
+      </section>
+
+      <section>
+        <h2>Reading aloud</h2>
+        <label class="field">
+          Voice
+          <select id="voiceURI"></select>
+        </label>
+        <label class="field">
+          Speed <output id="rateOut">1.0×</output>
+          <input id="rate" type="range" min="0.5" max="8" step="0.1" />
+        </label>
+        <label class="field">
+          Pitch <output id="pitchOut">1.0</output>
+          <input id="pitch" type="range" min="0" max="2" step="0.1" />
+        </label>
+        <label class="check">
+          <input id="followPage" type="checkbox" />
+          <span>
+            Turn pages automatically
+            <small>Follow the spoken word onto the next page as it is read.</small>
+          </span>
+        </label>
+        <div class="row">
+          <button id="testVoice" class="btn" type="button">Test voice</button>
+          <span id="status" class="status" role="status"></span>
+        </div>
+      </section>
+
+      <p class="muted small">
+        Everything runs locally in your browser. PDFs are rendered with pdf.js and edits are written
+        with pdf-lib; no document ever leaves your computer.
+      </p>
+    </main>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>
