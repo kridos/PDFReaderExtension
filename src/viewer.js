@@ -926,11 +926,16 @@ function updateReadingStatus(active) {
 
 function rangeInputs() {
   const total = Math.max(1, state.pageOrder.length);
-  const startPage = clampInt(ui.startPage.value, 1, total);
-  const endPage = clampInt(ui.endPage.value, 1, total);
+  // Both page fields are optional: an empty "To page" means "no stopping point",
+  // so reading continues to the end of the document.
+  const from = String(ui.startPage.value ?? "").trim();
+  const to = String(ui.endPage.value ?? "").trim();
+  const startPage = from ? clampInt(from, 1, total) : 1;
+  const endPage = to ? clampInt(to, 1, total) : total;
   return {
     startPage: Math.min(startPage, endPage),
     endPage: Math.max(startPage, endPage),
+    openEnded: !to,
     startWord: ui.startWord.value,
     endWord: ui.endWord.value,
   };
@@ -955,14 +960,17 @@ function useSelectionAsAnchor(which) {
     return;
   }
   const page = state.pageNumber;
+  // An empty bound means "first page" / "to the end", so only move bounds that
+  // are actually set — otherwise picking a start word would silently cap an
+  // open-ended range.
   if (which === "start") {
     ui.startWord.value = text;
     ui.startPage.value = String(page);
-    if (Number(ui.endPage.value) < page) ui.endPage.value = String(page);
+    if (ui.endPage.value && Number(ui.endPage.value) < page) ui.endPage.value = String(page);
   } else {
     ui.endWord.value = text;
     ui.endPage.value = String(page);
-    if (Number(ui.startPage.value) > page) ui.startPage.value = String(page);
+    if (ui.startPage.value && Number(ui.startPage.value) > page) ui.startPage.value = String(page);
   }
   scheduleRangePreview();
   const shown = text.length > 40 ? `${text.slice(0, 40)}…` : text;
@@ -975,7 +983,8 @@ function scheduleRangePreview() {
 }
 
 function previewSummary(range, inputs) {
-  const bits = [`Pages ${inputs.startPage}–${inputs.endPage}`];
+  const pages = `Pages ${inputs.startPage}–${inputs.endPage}`;
+  const bits = [inputs.openEnded ? `${pages} · to the end of the document` : pages];
   if (range.startMatch) bits.push(`starts on page ${range.startMatch.pageNumber}`);
   // Without an end word the range is fully described by its page numbers, and
   // guessing a duration would mean parsing every page first — which is the cost
@@ -999,7 +1008,8 @@ async function updateRangePreview() {
   const inputs = rangeInputs();
   const span = inputs.endPage - inputs.startPage + 1;
   if (span > 60) {
-    setRangeStatus(`Pages ${inputs.startPage}–${inputs.endPage}. Press “Read range” to start reading them.`);
+    const end = inputs.openEnded ? " (to the end of the document)" : "";
+    setRangeStatus(`Pages ${inputs.startPage}–${inputs.endPage}${end}. Press “Read range” to start reading them.`);
     ui.readRange.disabled = !Reader.supported;
     return;
   }

@@ -77,8 +77,8 @@
 
           <div class="reader-form">
             <div class="two">
-              <label>From page<input id="startPage" type="number" min="1" /></label>
-              <label>To page<input id="endPage" type="number" min="1" /></label>
+              <label>From page<input id="startPage" type="number" min="1" placeholder="first page" /></label>
+              <label>To page<input id="endPage" type="number" min="1" placeholder="end of document" /></label>
             </div>
             <label>
               Start at word
@@ -97,7 +97,8 @@
             <p class="hint">
               Type a word or phrase to begin and end at, or select one on the page and press
               <em>Use selection</em>. The first match inside the page range is used, so the whole
-              section never needs highlighting.
+              section never needs highlighting. Leave <em>To page</em> empty to keep reading to the
+              end of the document, and <em>From page</em> empty to start at the beginning.
             </p>
             <p id="rangeStatus" class="range-status">Open a PDF to set a reading range.</p>
             <div class="row">

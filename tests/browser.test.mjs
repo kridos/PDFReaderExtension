@@ -420,6 +420,59 @@ test("a long PDF is parsed page by page while it reads", async (t) => {
   assert.deepEqual(errors, [], `console errors: ${errors.join(" | ")}`);
 });
 
+test("reading can start from a page with no stopping point", async (t) => {
+  const PAGES = 30;
+  const long = await makeLongPdf(PAGES);
+  const { server, origin } = await startServer(long);
+  const browser = await chromium.launch();
+  t.after(async () => {
+    await browser.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const context = await browser.newContext();
+  await context.addInitScript(FAKE_TTS, 8);
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (err) => errors.push(err.message));
+  page.on("console", (msg) => {
+    if (msg.type() === "error") errors.push(msg.text());
+  });
+
+  await page.goto(`${origin}/src/viewer.html?file=${origin}/sample.pdf`);
+  await page.waitForFunction(
+    (n) => document.querySelector("#pageTotal")?.textContent === String(n),
+    String(PAGES),
+    { timeout: 20000 },
+  );
+
+  // Cleared "To page" means "keep going to the end of the document".
+  await page.fill("#startPage", "12");
+  await page.fill("#endPage", "");
+  await page.waitForFunction(
+    () => {
+      const status = document.querySelector("#rangeStatus")?.textContent ?? "";
+      return /Pages 12–30/.test(status) && /to the end of the document/.test(status);
+    },
+    null,
+    { timeout: 20000 },
+  );
+
+  await page.click("#btnReadRange");
+  await page.waitForFunction(() => /Page 30 marker/.test((window.__spoken ?? []).join(" ")), null, {
+    timeout: 30000,
+  });
+  await page.waitForFunction(() => /^Read /.test(document.querySelector("#rangeStatus")?.textContent ?? ""), null, {
+    timeout: 30000,
+  });
+
+  const spoken = await page.evaluate(() => window.__spoken.join(" "));
+  assert.match(spoken, /^Chapter 12/, "reading starts at the page typed into From page");
+  assert.doesNotMatch(spoken, /Page 11 marker/, "nothing before the start page is read");
+  assert.match(await page.textContent("#rangeStatus"), new RegExp(`^Read ${PAGES - 11} of ${PAGES - 11} pages`));
+  assert.deepEqual(errors, [], `console errors: ${errors.join(" | ")}`);
+});
+
 test("empty state and settings page load without errors", async (t) => {
   const sample = await makeSamplePdf();
   const { server, origin } = await startServer(sample);

@@ -65,12 +65,17 @@ After changing any source file, press **Reload** on the extension card in
 
 Open a PDF, then use the **Read aloud** panel on the right:
 
-- **From page / To page** — the inclusive page range.
+- **From page / To page** — the inclusive page range. Both are optional:
+  **To page** can be left empty for a range with no stopping point, which keeps
+  reading to the end of the document, and **From page** can be left empty to
+  start at the first page. With both empty the whole document is read.
 - **Start at word** — reading begins at the first occurrence of this word or
   phrase inside the range. Leave it empty to start at the top of the first page.
+  With an open-ended range, `From page` plus a start word is all you need: “read
+  from this paragraph onwards”.
 - **End at word** — reading stops **right after** the first occurrence of this
   word or phrase that comes after the start point. Leave it empty to read to the
-  end of the last page.
+  end of the range.
 - **Use selection** next to either field takes the word or phrase you have
   selected on the page, and moves the matching page bound to the page you are on
   so the anchor stays inside the range.
@@ -257,7 +262,7 @@ Minimal containers may need extra shared libraries and a fontconfig file; see
 
 ```bash
 npm test                # 27 tests: pure logic + real PDF bytes (Node only)
-npm run test:browser    # 3 tests: the viewer page and the settings page
+npm run test:browser    # 4 tests: the viewer page and the settings page
 npm run test:extension  # 2 tests: the loaded extension, PDFs and web pages
 ```
 
@@ -278,8 +283,9 @@ npm run test:extension  # 2 tests: the loaded extension, PDFs and web pages
   page it belongs to. A second test opens a 30-page PDF and reads the whole
   document: it records each status line and asserts reading started when only the
   first page had been parsed, that the loaded-page count climbs to 30, and that
-  every page was spoken exactly once. A third test covers the empty state and the
-  settings page.
+  every page was spoken exactly once. A third clears **To page**, starts from page
+  12 and confirms the reading runs on to the last page without reading anything
+  before it. A fourth test covers the empty state and the settings page.
 - **`npm run test:extension`** (`tests/extension.test.mjs`) loads the unpacked
   extension in full Chromium and checks the redirect rule and settings toggle,
   opens a `.pdf` URL and an extension-less PDF URL into the viewer, then injects
