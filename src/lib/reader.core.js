@@ -12,14 +12,21 @@ class Reader {
   }
 
   /**
-   * @param {{onState?: (state: string) => void, onProgress?: (p: {absolute: number, chunkIndex: number, chunk: {start: number, end: number, text: string}}) => void, onStarved?: () => void}} handlers
+   * @param {{onState?: (state: string) => void, onProgress?: (p: {absolute: number, chunkIndex: number, chunk: {start: number, end: number, text: string}}) => void, onStarved?: () => void, onError?: (info: {reason: string, chunkIndex: number}) => void, onVoiceFallback?: (info: {reason: string}) => void}} handlers
    */
-  constructor({ onState, onProgress, onStarved } = {}) {
+  constructor({ onState, onProgress, onStarved, onError, onVoiceFallback } = {}) {
     this.onState = onState ?? (() => {});
     this.onProgress = onProgress ?? (() => {});
     // Called when playback catches up with chunks that have not been supplied
     // yet; the caller can append more text and playback carries on.
     this.onStarved = onStarved ?? (() => {});
+    // Called when the speech engine refuses to speak at all, so the caller can
+    // say why instead of leaving the panel looking stuck on "playing".
+    this.onError = onError ?? (() => {});
+    // Called when the chosen voice could not speak and the default voice took
+    // over, so the reader keeps going instead of falling silent.
+    this.onVoiceFallback = onVoiceFallback ?? (() => {});
+    this._voiceUnusable = false;
     this.chunks = [];
     this.index = 0;
     this.state = "idle"; // idle | playing | paused | ended
@@ -33,6 +40,9 @@ class Reader {
     this._current = null;
     this._keepAlive = [];
     this._starved = false;
+    // When the queue was last cancelled; Chrome can drop an utterance that is
+    // queued in the same task as cancel(), so speaking waits a moment after it.
+    this._cancelledAt = 0;
   }
 
   get voices() {
@@ -70,6 +80,7 @@ class Reader {
     this.open = Boolean(range.open);
     this.index = 0;
     this._starved = false;
+    this._voiceUnusable = false;
     this._setState("idle");
   }
 
@@ -129,7 +140,10 @@ class Reader {
     this._current = null;
     this._starved = false;
     this._keepAlive = [];
-    if (Reader.supported) window.speechSynthesis.cancel();
+    if (Reader.supported) {
+      this._cancelledAt = Date.now();
+      window.speechSynthesis.cancel();
+    }
     if (this.state !== "idle") this._setState("idle");
   }
 
@@ -139,6 +153,7 @@ class Reader {
     this.index = Math.min(Math.max(0, i), this.chunks.length - 1);
     if (this.state === "playing" || this.state === "paused") {
       this._token++;
+      this._cancelledAt = Date.now();
       window.speechSynthesis.cancel();
       this._setState("playing");
       this._speakCurrent();
@@ -154,7 +169,7 @@ class Reader {
   }
 
   _pickVoice() {
-    if (!this.voiceURI) return null;
+    if (!this.voiceURI || this._voiceUnusable) return null;
     return window.speechSynthesis.getVoices().find((v) => v.voiceURI === this.voiceURI) ?? null;
   }
 
@@ -170,12 +185,19 @@ class Reader {
       this._setState("ended");
       return;
     }
-    const chunk = this.chunks[this.index];
+    this._startUtterance(this.chunks[this.index], token, false);
+  }
+
+  /**
+   * Queue one chunk. `fallback` means "speak with the default voice", used when
+   * the voice the user picked turns out to be unusable on this machine.
+   */
+  _startUtterance(chunk, token, fallback) {
     const utter = new SpeechSynthesisUtterance(chunk.text);
     utter.rate = Math.min(10, Math.max(0.1, this.rate));
     utter.pitch = Math.min(2, Math.max(0, this.pitch));
     utter.volume = Math.min(1, Math.max(0, this.volume));
-    const voice = this._pickVoice();
+    const voice = fallback ? null : this._pickVoice();
     if (voice) {
       utter.voice = voice;
       utter.lang = voice.lang;
@@ -184,7 +206,31 @@ class Reader {
     this._keepAlive.push(utter);
     if (this._keepAlive.length > 8) this._keepAlive.shift();
 
+    let started = false;
+    let failed = false;
+    // Chrome can accept an utterance and then never report anything at all:
+    // no start, no end, no error. Treat silence as a failure so the panel can
+    // say what happened instead of sitting there looking busy.
+    let watchdog = 0;
+    const stopWatchdog = () => clearTimeout(watchdog);
+    const armWatchdog = () => {
+      watchdog = setTimeout(() => {
+        if (token !== this._token || started || failed) return;
+        if (this.state !== "playing") return;
+        // A background tab may simply not have got round to it yet.
+        if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+          armWatchdog();
+          return;
+        }
+        failed = true;
+        this._failUtterance(chunk, token, fallback, "did-not-start");
+      }, 4000);
+    };
+    armWatchdog();
+
     utter.onstart = () => {
+      started = true;
+      stopWatchdog();
       if (token !== this._token) return;
       this.onProgress({ absolute: chunk.start, chunkIndex: this.index, chunk });
     };
@@ -201,21 +247,54 @@ class Reader {
     };
 
     utter.onend = () => {
+      stopWatchdog();
       if (token !== this._token) return;
       this.index++;
       this._speakCurrent();
     };
 
     utter.onerror = (event) => {
-      if (token !== this._token) return;
-      const reason = event.error ?? "";
+      stopWatchdog();
+      const reason = event.error ?? "speech-error";
       if (reason === "interrupted" || reason === "canceled") return;
-      // "not-allowed" / "synthesis-failed": stop rather than loop forever.
-      this._setState("idle");
+      if (token !== this._token || failed) return;
+      failed = true;
+      // A voice that already started and then broke keeps the text it read.
+      this._failUtterance(chunk, token, fallback || started, reason);
     };
 
     this._setState("playing");
-    window.speechSynthesis.speak(utter);
+    const speak = () => {
+      if (token !== this._token || failed) return;
+      try {
+        // A queue left paused by an earlier cancel() (a known Chrome bug) takes
+        // utterances without ever speaking them.
+        if (window.speechSynthesis.paused) window.speechSynthesis.resume();
+        window.speechSynthesis.speak(utter);
+      } catch (error) {
+        stopWatchdog();
+        if (token !== this._token || failed) return;
+        failed = true;
+        this._failUtterance(chunk, token, fallback, error?.message || "speak-failed");
+      }
+    };
+    // Speaking in the same task as cancel() makes Chrome drop the utterance
+    // silently; a short pause after cancelling avoids that entirely.
+    if (this._cancelledAt && Date.now() - this._cancelledAt < 250) setTimeout(speak, 120);
+    else speak();
+  }
+
+  /** Give up on this utterance, retrying on the default voice once if we can. */
+  _failUtterance(chunk, token, fallback, reason) {
+    if (token !== this._token) return;
+    if (!fallback && this.voiceURI && !this._voiceUnusable) {
+      this._voiceUnusable = true;
+      this.onVoiceFallback({ reason });
+      this._startUtterance(chunk, token, true);
+      return;
+    }
+    this._setState("idle");
+    this.onError({ reason, chunkIndex: this.index });
   }
 }
 

@@ -82,7 +82,15 @@ async function startServer(sample) {
   return { server, origin: `http://127.0.0.1:${port}` };
 }
 
-const FAKE_TTS = (wordDelay = 25) => {
+/**
+ * @param {number|{wordDelay?: number, fail?: string, silent?: boolean, failVoice?: string}} options
+ *   `fail` makes every utterance error with that reason, `silent` mimics Chrome
+ *   swallowing an utterance without any event at all, and `failVoice` makes only
+ *   utterances using that voice fail.
+ */
+const FAKE_TTS = (options = {}) => {
+  const opts = typeof options === "number" ? { wordDelay: options } : options;
+  const { wordDelay = 25, fail = "", silent = false, failVoice = "" } = opts;
   class FakeUtterance {
     constructor(text) {
       this.text = text;
@@ -111,8 +119,18 @@ const FAKE_TTS = (wordDelay = 25) => {
       window.__spoken.push(utterance.text);
       window.__rates = window.__rates || [];
       window.__rates.push(utterance.rate);
+      window.__voices = window.__voices || [];
+      window.__voices.push(utterance.voice?.voiceURI ?? null);
       this.current = utterance;
       this.speaking = true;
+      if (silent) return;
+      if (fail || (failVoice && utterance.voice?.voiceURI === failVoice)) {
+        setTimeout(() => {
+          this.speaking = false;
+          utterance.onerror?.({ error: fail || "synthesis-failed" });
+        }, 0);
+        return;
+      }
       utterance.onstart?.();
       const positions = [];
       const re = /\S+/g;
@@ -471,6 +489,110 @@ test("reading can start from a page with no stopping point", async (t) => {
   assert.doesNotMatch(spoken, /Page 11 marker/, "nothing before the start page is read");
   assert.match(await page.textContent("#rangeStatus"), new RegExp(`^Read ${PAGES - 11} of ${PAGES - 11} pages`));
   assert.deepEqual(errors, [], `console errors: ${errors.join(" | ")}`);
+});
+
+test("a speech engine that cannot speak says why instead of going quiet", async (t) => {
+  const sample = await makeSamplePdf();
+  const { server, origin } = await startServer(sample);
+  const browser = await chromium.launch();
+  t.after(async () => {
+    await browser.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const context = await browser.newContext();
+  await context.addInitScript(FAKE_TTS, { wordDelay: 8, fail: "synthesis-failed" });
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (err) => errors.push(err.message));
+  page.on("console", (msg) => {
+    if (msg.type() === "error") errors.push(msg.text());
+  });
+
+  await page.goto(`${origin}/src/viewer.html?file=${origin}/sample.pdf`);
+  await page.waitForFunction(() => document.querySelector("#pageTotal")?.textContent === "3", null, { timeout: 20000 });
+  await page.fill("#startPage", "1");
+  await page.waitForFunction(() => /Pages 1–3/.test(document.querySelector("#rangeStatus")?.textContent ?? ""), null, {
+    timeout: 20000,
+  });
+
+  await page.click("#btnReadRange");
+  await page.waitForFunction(
+    () => /could not produce sound/i.test(document.querySelector("#rangeStatus")?.textContent ?? ""),
+    null,
+    { timeout: 15000 },
+  );
+
+  const status = await page.textContent("#rangeStatus");
+  assert.match(status, /synthesis-failed/);
+  assert.match(status, /different voice/i, "the message tells the user what to try");
+  // The panel must not look like it is still reading. Chrome fires no end event
+  // when it refuses an utterance, so without this the player stayed on \"playing\".
+  assert.equal(await page.textContent("#btnPlayPause"), "▶");
+  assert.equal(await page.isDisabled("#btnStop"), true);
+  assert.ok(
+    (await page.locator("#transcript .sentence").count()) > 0,
+    "the text that was queued is still shown",
+  );
+  assert.equal(await page.isVisible("#toast"), true);
+  assert.deepEqual(errors, [], `console errors: ${errors.join(" | ")}`);
+});
+
+test("an engine that swallows the utterance is reported instead of hanging", async (t) => {
+  const sample = await makeSamplePdf();
+  const { server, origin } = await startServer(sample);
+  const browser = await chromium.launch();
+  t.after(async () => {
+    await browser.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const context = await browser.newContext();
+  await context.addInitScript(FAKE_TTS, { silent: true });
+  const page = await context.newPage();
+
+  await page.goto(`${origin}/src/viewer.html?file=${origin}/sample.pdf`);
+  await page.waitForFunction(() => document.querySelector("#pageTotal")?.textContent === "3", null, { timeout: 20000 });
+  await page.click("#btnReadRange");
+
+  // No start, no end, no error: exactly the "is it hung?" case.
+  await page.waitForFunction(
+    () => /did not start/i.test(document.querySelector("#rangeStatus")?.textContent ?? ""),
+    null,
+    { timeout: 15000 },
+  );
+  assert.equal(await page.textContent("#btnPlayPause"), "▶");
+  assert.equal(await page.isDisabled("#btnStop"), true);
+});
+
+test("a chosen voice that cannot speak falls back to the default voice", async (t) => {
+  const sample = await makeSamplePdf();
+  const { server, origin } = await startServer(sample);
+  const browser = await chromium.launch();
+  t.after(async () => {
+    await browser.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const context = await browser.newContext();
+  await context.addInitScript(FAKE_TTS, { wordDelay: 8, failVoice: "test-voice" });
+  const page = await context.newPage();
+
+  await page.goto(`${origin}/src/viewer.html?file=${origin}/sample.pdf`);
+  await page.waitForFunction(() => document.querySelector("#pageTotal")?.textContent === "3", null, { timeout: 20000 });
+  await page.waitForFunction(() => document.querySelectorAll("#voiceSelect option").length > 0, null, { timeout: 10000 });
+  await page.selectOption("#voiceSelect", "test-voice");
+
+  await page.click("#btnReadRange");
+  // The retry lands a tick after the first attempt is refused.
+  await page.waitForFunction(() => (window.__voices ?? []).length >= 2, null, { timeout: 15000 });
+
+  const used = await page.evaluate(() => window.__voices);
+  assert.equal(used[0], "test-voice", "the picked voice is tried first");
+  assert.equal(used[1], null, "the retry drops the voice that could not speak");
+  const spoken = await page.evaluate(() => window.__spoken.join(" "));
+  assert.match(spoken, /^Chapter one/, "reading continues with the default voice");
+  assert.match(await page.textContent("#toast"), /default voice/i);
 });
 
 test("empty state and settings page load without errors", async (t) => {

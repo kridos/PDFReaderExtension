@@ -47,6 +47,16 @@
       const rawOffset = segment.map[index];
       if (rawOffset != null) highlightAt(rawOffset);
     },
+    onError: ({ reason }) => {
+      const voices = window.speechSynthesis ? window.speechSynthesis.getVoices().length : 0;
+      setStatus(
+        voices
+          ? `Speech stopped (${reason}). Pick another voice, then press Read again.`
+          : "This browser has no voices installed, so nothing can be read aloud.",
+        "error",
+      );
+    },
+    onVoiceFallback: () => setStatus("That voice could not speak, so the default voice is being used.", "ok"),
   });
 
   /* ------------------------------ extraction ------------------------------ */

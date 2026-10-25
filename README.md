@@ -14,7 +14,7 @@ rearrange pages and save a new copy.
 - **No build step** — the extension loads unpacked as-is; pdf.js and pdf-lib are
   vendored in `src/vendor/`.
 
-Status: version 0.1.0, in development. All automated suites pass (27 unit / 3
+Status: version 0.1.0, in development. All automated suites pass (27 unit / 7
 viewer / 2 extension tests — see [Testing](#testing)).
 
 ## Contents
@@ -106,6 +106,17 @@ slider are in the same panel; voice, speed and pitch live in [Settings](#setting
 Speed runs from 0.5× to 8×, and changes take effect from the next sentence.
 Chrome's own voices vary above roughly 3×: some keep going cleanly, others turn
 buzzy or stop getting faster, so try the range on the voice you use.
+
+**When the voice cannot speak.** Chrome sometimes refuses a sentence outright —
+a voice that is no longer installed, a network voice while offline, or an engine
+left paused by an earlier stop. That used to be silent: the queue ended and the
+panel looked idle with the text sitting in the **Reading** list. Now the status
+line and a toast say what happened, for example `The speech engine could not
+produce sound (synthesis-failed). Pick a different voice in Settings, or slow the
+speed down.` If the voice you picked cannot speak, the sentence is retried on the
+default system voice and reading carries on. A sentence that neither starts nor
+reports an error within a few seconds is reported as `did not start` instead of
+leaving the player looking busy.
 
 ## Reading a web page
 
@@ -262,7 +273,7 @@ Minimal containers may need extra shared libraries and a fontconfig file; see
 
 ```bash
 npm test                # 27 tests: pure logic + real PDF bytes (Node only)
-npm run test:browser    # 4 tests: the viewer page and the settings page
+npm run test:browser    # 7 tests: the viewer page and the settings page
 npm run test:extension  # 2 tests: the loaded extension, PDFs and web pages
 ```
 
@@ -285,7 +296,12 @@ npm run test:extension  # 2 tests: the loaded extension, PDFs and web pages
   first page had been parsed, that the loaded-page count climbs to 30, and that
   every page was spoken exactly once. A third clears **To page**, starts from page
   12 and confirms the reading runs on to the last page without reading anything
-  before it. A fourth test covers the empty state and the settings page.
+  before it. Three more cover a speech engine that refuses every utterance (the
+  status line and toast must explain why and the player must go back to idle), an
+  engine that accepts an utterance and never reports anything (reported as `did
+  not start` rather than hanging), and a chosen voice that cannot speak (the
+  sentence is retried on the default voice and reading continues). A final test
+  covers the empty state and the settings page.
 - **`npm run test:extension`** (`tests/extension.test.mjs`) loads the unpacked
   extension in full Chromium and checks the redirect rule and settings toggle,
   opens a `.pdf` URL and an extension-less PDF URL into the viewer, then injects

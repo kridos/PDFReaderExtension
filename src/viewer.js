@@ -102,7 +102,38 @@ const reader = new Reader({
     if (feed && reader.chunks.length - reader.index <= 1) void pumpReading();
   },
   onStarved: () => void pumpReading(),
+  onError: ({ reason }) => reportSpeechFailure(reason),
+  onVoiceFallback: () =>
+    toast("That voice could not speak here, so the system default voice is being used.", 6000),
 });
+
+/**
+ * The speech engine refusing to speak is otherwise invisible: the panel empties
+ * its queue and looks idle with no sound and no explanation.
+ */
+function reportSpeechFailure(reason) {
+  // Nothing is being read any more: stop pulling pages in, and keep the status
+  // line from being overwritten by a progress update.
+  if (feed) {
+    feed.finished = true;
+    feed = null;
+  }
+  const voices = Reader.supported ? window.speechSynthesis.getVoices().length : 0;
+  let message;
+  if (!voices) {
+    message = "This browser has no voices installed, so nothing can be read aloud. Install a text-to-speech voice in your system settings.";
+  } else if (reason === "did-not-start") {
+    message = "The speech engine did not start. Press play again, or pick another voice in Settings.";
+  } else if (reason === "not-allowed") {
+    message = "The browser blocked speech. Click the page, then press play again.";
+  } else if (reason === "synthesis-failed" || reason === "voice-unavailable") {
+    message = `The speech engine could not produce sound (${reason}). Pick a different voice in Settings, or slow the speed down.`;
+  } else {
+    message = `Speech stopped: ${reason}. Try another voice in Settings.`;
+  }
+  setRangeStatus(message, "error");
+  toast(message, 7000);
+}
 
 /* ------------------------------------------------------------------ */
 /* Small utilities                                                     */
@@ -824,6 +855,8 @@ const TRANSCRIPT_LIMIT = 400;
 /** The range being read right now, or null. */
 let feed = null;
 let pumping = false;
+/** True while the status line belongs to a reading, so the range preview leaves it alone. */
+let rangeStatusLocked = false;
 
 /**
  * Reading range that pulls its text in one page at a time, so playback can
@@ -999,6 +1032,8 @@ function previewSummary(range, inputs) {
 }
 
 async function updateRangePreview() {
+  // A reading (or the reason one stopped) owns the status line until it is over.
+  if (rangeStatusLocked) return;
   const seq = ++previewSeq;
   if (!state.doc) {
     setRangeStatus("Open a PDF to set a reading range.");
@@ -1047,6 +1082,7 @@ async function updateRangePreview() {
 /** Stop whatever is reading and forget the range being streamed. */
 function stopReading() {
   feed = null;
+  rangeStatusLocked = false;
   reader.stop();
   ui.playPause.textContent = "▶";
   ui.stop.disabled = true;
@@ -1056,6 +1092,7 @@ async function startReading() {
   if (!state.doc) return;
   const inputs = rangeInputs();
   stopReading();
+  rangeStatusLocked = true;
   clearTranscript();
   state.range = null;
   state.chunks = [];
@@ -1091,13 +1128,19 @@ async function startReading() {
     }
     updateReadingStatus(active);
 
-    if (active.range.startMatch) {
-      await goToPage(active.range.startMatch.pageNumber);
-    }
-
+    // Start the voice before touching the page: a slow or stuck page render
+    // must never hold up the audio.
     reader.play();
     ui.stop.disabled = false;
     void pumpReading();
+
+    if (active.range.startMatch) {
+      try {
+        await goToPage(active.range.startMatch.pageNumber);
+      } catch {
+        // A page that will not render is not a reason to stop reading.
+      }
+    }
   } catch (error) {
     setRangeStatus(`Could not read: ${error.message}`, "error");
   } finally {
@@ -1415,8 +1458,13 @@ function wireEvents() {
   });
 
   for (const input of [ui.startPage, ui.endPage, ui.startWord, ui.endWord]) {
-    input.addEventListener("input", scheduleRangePreview);
-    input.addEventListener("change", scheduleRangePreview);
+    const edited = () => {
+      // Editing the range hands the status line back to the preview.
+      rangeStatusLocked = false;
+      scheduleRangePreview();
+    };
+    input.addEventListener("input", edited);
+    input.addEventListener("change", edited);
   }
   for (const [id, which] of [
     ["useStartSelection", "start"],
