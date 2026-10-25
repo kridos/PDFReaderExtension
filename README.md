@@ -9,12 +9,14 @@ rearrange pages and save a new copy.
   separate words or phrases, typed or taken from the current selection.
 - **Follow along** — the spoken word is highlighted as it is read, and the PDF
   viewer turns pages for you.
+- **One page or a scrolling column** — show a single page at a time or every page
+  stacked up, and annotate whichever page you are looking at.
 - **Local only** — pdf.js renders, pdf-lib writes, Chrome's own speech
   synthesiser speaks. Nothing is uploaded and no API key is needed.
 - **No build step** — the extension loads unpacked as-is; pdf.js and pdf-lib are
   vendored in `src/vendor/`.
 
-Status: version 0.1.0, in development. All automated suites pass (27 unit / 10
+Status: version 0.1.0, in development. All automated suites pass (27 unit / 14
 viewer / 2 extension tests — see [Testing](#testing)).
 
 ## Contents
@@ -22,6 +24,7 @@ viewer / 2 extension tests — see [Testing](#testing)).
 - [What it does](#what-it-does)
 - [Install and run](#install-and-run)
 - [Reading a PDF range aloud](#reading-a-pdf-range-aloud)
+- [Page layout](#page-layout)
 - [Reading a web page](#reading-a-web-page)
 - [Annotating and editing PDFs](#annotating-and-editing-pdfs)
 - [Keyboard shortcuts](#keyboard-shortcuts)
@@ -38,6 +41,7 @@ viewer / 2 extension tests — see [Testing](#testing)).
 | PDFs | Web pages |
 | --- | --- |
 | Open from links, HTTP(S) URLs or local files | Click the toolbar icon on any normal page |
+| One page at a time or a continuous scroll | Click the toolbar icon on any normal page |
 | Read a page range or a word-to-word range | Read a word-to-word range |
 | Highlight, pen, text boxes, erase, undo | Highlight the spoken word in place |
 | Rotate, delete and reorder pages | Page scrolls to keep the word visible |
@@ -140,6 +144,22 @@ the player looking busy. That message includes how many voices the browser lists
 and the console gets a `[PDF Reader] speech failed` line with the engine state
 (`speaking`/`pending`/`paused`) so a stubborn machine can be diagnosed.
 
+## Page layout
+
+Two buttons next to the zoom controls choose how pages are shown, and the choice
+is remembered for the next document:
+
+- **Page** — one page at a time. <kbd>←</kbd>/<kbd>→</kbd>, the page box and the
+  thumbnail rail move between pages.
+- **Scroll** — every page stacked in one continuous column, so a page break does
+  not stop you. Pages are drawn as they come into view (well before they reach the
+  screen), the page box and thumbnails follow the scroll position, and **Read
+  range** scrolls to the page it is reading. Each page has its own text layer and
+  annotation layers, so highlighting, pen, text boxes and erasing work on the page
+  you use them on. **Fit to width** fits each page to its own slot.
+
+Zoom, rotate, page order and saving behave the same in both layouts.
+
 ## Reading a web page
 
 Click the extension icon on any ordinary page and a compact panel appears in the
@@ -212,7 +232,8 @@ Open with the ⚙ button in the viewer toolbar, the panel footer, or
 `chrome://extensions` → Details → Extension options.
 
 - **Open PDF links in PDF Reader** — takeover of `.pdf` navigations; turn it off
-  to keep Chrome's built-in viewer.
+  to keep Chrome's built-in viewer. **Open PDFs here** in the viewer toolbar is
+  the same switch, so it can be flipped without leaving the document.
 - **Voice**, **Speed** (0.5×–8×), **Pitch** — used by both the PDF viewer and the
   page panel.
 - **Turn pages automatically** — follow the reader onto the next PDF page.
@@ -298,7 +319,7 @@ Minimal containers may need extra shared libraries and a fontconfig file; see
 
 ```bash
 npm test                # 27 tests: pure logic + real PDF bytes (Node only)
-npm run test:browser    # 10 tests: the viewer page and the settings page
+npm run test:browser    # 14 tests: the viewer page and the settings page
 npm run test:extension  # 2 tests: the loaded extension, PDFs and web pages
 ```
 
@@ -332,8 +353,14 @@ npm run test:extension  # 2 tests: the loaded extension, PDFs and web pages
   end of page 2 only — then switches back to the plain range and asserts the
   start word is cleared. Another opens
   a PDF whose filename only exists in its `Content-Disposition` header and saves
-  it untouched, checking the download keeps that name. A final test covers the
-  empty state and the settings page.
+  it untouched, checking the download keeps that name. Three cover the layout:
+  switching to **Scroll** stacks all three pages with their own text layers,
+  jumps to page 3 and returns to **Page** still on page 3 (with the choice stored
+  in settings); a highlight made on page 2 of the column lands on page 2 and
+  nowhere else; and **Open PDFs here** writes the setting the service worker
+  reads, before and after a reload. One more jumps to the end of a 12-page
+  column, checks the first page's bitmap was freed, and that going back draws it
+  again. A final test covers the empty state and the settings page.
 - **`npm run test:extension`** (`tests/extension.test.mjs`) loads the unpacked
   extension in full Chromium and checks that PDFs are taken over from their
   response headers, that a `Content-Disposition: attachment` link downloads under
@@ -378,6 +405,10 @@ after loading unpacked:
    appears instead of a panel.
 9. Change voice and speed in Settings, then reopen the panel: the choices carry
    over.
+10. Press **Scroll** next to the zoom controls: the pages stack and the page box
+    follows the scroll; press **Page** and confirm you are on the page you were
+    looking at. Then turn **Open PDFs here** off and open another PDF link:
+    Chrome's own viewer takes it, and the toggle brings it back.
 
 ### Testing in a restricted container
 

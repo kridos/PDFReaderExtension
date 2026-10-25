@@ -2,6 +2,7 @@
 
 export const DEFAULTS = {
   autoOpenPdf: true,
+  viewMode: "paged",
   voiceURI: "",
   rate: 1,
   pitch: 1,

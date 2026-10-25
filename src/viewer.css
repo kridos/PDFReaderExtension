@@ -111,10 +111,15 @@ body {
 }
 
 .btn.toggle[aria-pressed="true"],
+.btn.seg[aria-pressed="true"],
 .btn.tool.active {
   background: #2b3150;
   border-color: var(--accent);
   color: #dfe2ff;
+}
+
+.btn.seg {
+  padding: 6px 9px;
 }
 
 .page-input {
@@ -295,7 +300,7 @@ main.reader-hidden #readerPanel {
   background: #0a0c11;
 }
 
-#pageWrap {
+.page {
   position: relative;
   flex: none;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.55);
@@ -303,11 +308,31 @@ main.reader-hidden #readerPanel {
   line-height: 0;
 }
 
-#pageWrap:empty {
+.page[hidden] {
   display: none;
 }
 
-#pdfCanvas {
+/* Continuous layout: the pages are stacked and the stage scrolls through them. */
+.page-stream {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  padding-bottom: 48px;
+}
+
+.page-stream[hidden] {
+  display: none;
+}
+
+/* Before a page has been rendered its box keeps the page's rough shape, so the
+   scrollbar and the page offsets do not jump about while scrolling. */
+.page-stream .page[data-placeholder] {
+  width: min(100%, 780px);
+  aspect-ratio: 8.5 / 11;
+}
+
+.pdf-canvas {
   display: block;
 }
 
@@ -322,8 +347,8 @@ main.reader-hidden #readerPanel {
   user-select: text;
 }
 
-#pageWrap[data-tool="select"] .text-layer,
-#pageWrap[data-tool="highlight"] .text-layer {
+.page[data-tool="select"] .text-layer,
+.page[data-tool="highlight"] .text-layer {
   pointer-events: auto;
 }
 
@@ -353,12 +378,12 @@ main.reader-hidden #readerPanel {
   pointer-events: none;
 }
 
-#pageWrap[data-tool="pen"] .ink-canvas {
+.page[data-tool="pen"] .ink-canvas {
   pointer-events: auto;
   cursor: crosshair;
 }
 
-#pageWrap[data-tool="erase"] .ink-canvas {
+.page[data-tool="erase"] .ink-canvas {
   pointer-events: auto;
   cursor: not-allowed;
 }
@@ -398,24 +423,24 @@ main.reader-hidden #readerPanel {
   background: rgba(255, 255, 255, 0.06);
 }
 
-#pageWrap[data-tool="pen"] .annot-layer,
-#pageWrap[data-tool="highlight"] .annot-layer {
+.page[data-tool="pen"] .annot-layer,
+.page[data-tool="highlight"] .annot-layer {
   pointer-events: none;
 }
 
-#pageWrap[data-tool="pen"] .annot-layer .tx,
-#pageWrap[data-tool="highlight"] .annot-layer .tx {
+.page[data-tool="pen"] .annot-layer .tx,
+.page[data-tool="highlight"] .annot-layer .tx {
   pointer-events: none;
 }
 
-#pageWrap[data-tool="erase"] .annot-layer .hl,
-#pageWrap[data-tool="erase"] .annot-layer .tx {
+.page[data-tool="erase"] .annot-layer .hl,
+.page[data-tool="erase"] .annot-layer .tx {
   pointer-events: auto;
   cursor: not-allowed;
 }
 
-#pageWrap[data-tool="erase"] .annot-layer .hl:hover,
-#pageWrap[data-tool="erase"] .annot-layer .tx:hover {
+.page[data-tool="erase"] .annot-layer .hl:hover,
+.page[data-tool="erase"] .annot-layer .tx:hover {
   outline: 1.5px solid var(--danger);
 }
 

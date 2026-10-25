@@ -27,6 +27,11 @@
           <button id="btnZoomIn" class="btn icon" title="Zoom in (Ctrl++)">+</button>
         </div>
 
+        <div class="group layout" role="group" aria-label="Page layout">
+          <button id="btnViewPaged" class="btn seg" aria-pressed="true" title="One page at a time">Page</button>
+          <button id="btnViewScroll" class="btn seg" aria-pressed="false" title="Scroll continuously through the pages">Scroll</button>
+        </div>
+
         <div class="group tools" role="group" aria-label="Annotation tools">
           <button class="btn tool" data-tool="select" title="Select text (V)">Select</button>
           <button class="btn tool" data-tool="highlight" title="Highlight the selected text (H)">Highlight</button>
@@ -39,6 +44,7 @@
         </div>
 
         <div class="group right">
+          <button id="btnAutoOpen" class="btn toggle" aria-pressed="true" title="PDF links open in PDF Reader">Open PDFs here</button>
           <button id="btnReader" class="btn toggle" aria-pressed="true" title="Show the reading panel">Read aloud</button>
           <button id="btnOptions" class="btn icon" title="Settings">⚙</button>
         </div>
@@ -54,20 +60,20 @@
         </aside>
 
         <section id="stage">
-          <div id="pageWrap" data-tool="select">
-            <canvas id="pdfCanvas"></canvas>
+          <div id="pageWrap" class="page" data-tool="select">
+            <canvas id="pdfCanvas" class="pdf-canvas"></canvas>
             <div id="textLayer" class="text-layer" aria-hidden="true"></div>
             <canvas id="inkCanvas" class="ink-canvas"></canvas>
             <div id="annotLayer" class="annot-layer"></div>
           </div>
+          <div id="pageStream" class="page-stream" role="group" aria-label="Pages" hidden></div>
 
           <div id="emptyState" class="empty">
             <h1>Open a PDF to get started</h1>
             <p>Drag a PDF anywhere on this window, or</p>
             <button id="btnOpenBig" class="btn primary big">Choose a PDF file</button>
-            <p class="muted small">
-              With “Open PDF links in PDF Reader” enabled in settings, clicking any PDF link opens it
-              here too.
+            <p id="autoOpenHint" class="muted small">
+              PDF links you click open here too. Turn that off with “Open PDFs here” in the toolbar.
             </p>
           </div>
         </section>

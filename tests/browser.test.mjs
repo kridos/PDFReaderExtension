@@ -748,3 +748,201 @@ test("empty state and settings page load without errors", async (t) => {
 
   assert.deepEqual(errors, [], `console errors: ${errors.join(" | ")}`);
 });
+
+test("the layout toggle stacks every page and keeps the page number in step", async (t) => {
+  const sample = await makeSamplePdf();
+  const { server, origin } = await startServer(sample);
+  const browser = await chromium.launch();
+  t.after(async () => {
+    await browser.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const context = await browser.newContext();
+  await context.addInitScript(FAKE_TTS, 6);
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (err) => errors.push(err.message));
+
+  await page.goto(`${origin}/src/viewer.html?file=${origin}/sample.pdf`);
+  await page.waitForFunction(() => document.querySelector("#pageTotal")?.textContent === "3", null, { timeout: 20000 });
+  assert.equal(await page.isVisible("#pageWrap"), true, "the page layout starts on one page");
+  assert.equal(await page.isVisible("#pageStream"), false);
+
+  await page.click("#btnViewScroll");
+  await page.waitForFunction(() => document.querySelectorAll("#pageStream .page").length === 3, null, { timeout: 10000 });
+  assert.equal(await page.isVisible("#pageWrap"), false);
+  assert.equal(await page.getAttribute("#btnViewScroll", "aria-pressed"), "true");
+  const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("pdfreader.settings")));
+  assert.equal(stored.viewMode, "scroll", "the layout choice is remembered");
+
+  // Every page has its own text layer, and the one for page 2 is rendered.
+  await page.waitForFunction(
+    () => document.querySelectorAll('#pageStream .page[data-page="2"] .text-layer .w').length > 0,
+    null,
+    { timeout: 15000 },
+  );
+  const firstWords = await page.textContent('#pageStream .page[data-page="2"] .text-layer');
+  assert.match(firstWords, /Beta marker appears here\./, "page 2 has its own selectable text");
+
+  // Jumping to a page scrolls it to the top of the stage.
+  await page.fill("#pageInput", "3");
+  await page.press("#pageInput", "Enter");
+  await page.waitForFunction(
+    () => {
+      const stage = document.querySelector("#stage").getBoundingClientRect();
+      const third = document.querySelector('#pageStream .page[data-page="3"]');
+      return Boolean(third) && Math.abs(third.getBoundingClientRect().top - stage.top) < 40;
+    },
+    null,
+    { timeout: 10000 },
+  );
+  assert.equal(await page.inputValue("#pageInput"), "3");
+  await page.waitForFunction(
+    () => document.querySelectorAll('#pageStream .page[data-page="3"] .text-layer .w').length > 0,
+    null,
+    { timeout: 15000 },
+  );
+  assert.match(await page.textContent('#pageStream .page[data-page="3"] .text-layer'), /Gamma marker/);
+
+  // Back to one page at a time, still on page 3.
+  await page.click("#btnViewPaged");
+  await page.waitForSelector("#pageWrap:not([hidden])");
+  assert.equal(await page.isVisible("#pageStream"), false);
+  await page.waitForFunction(
+    () => (document.querySelector("#pdfCanvas")?.width ?? 0) > 300,
+    null,
+    { timeout: 15000 },
+  );
+  assert.equal(await page.inputValue("#pageInput"), "3");
+  assert.match(await page.textContent("#textLayer"), /Gamma marker/, "the page layout follows the scroll position");
+
+  assert.deepEqual(errors, [], `page errors: ${errors.join(" | ")}`);
+});
+
+test("a highlight can be added from the continuous layout", async (t) => {
+  const sample = await makeSamplePdf();
+  const { server, origin } = await startServer(sample);
+  const browser = await chromium.launch();
+  t.after(async () => {
+    await browser.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const context = await browser.newContext();
+  await context.addInitScript(FAKE_TTS, 6);
+  const page = await context.newPage();
+
+  await page.goto(`${origin}/src/viewer.html?file=${origin}/sample.pdf`);
+  await page.waitForFunction(() => document.querySelector("#pageTotal")?.textContent === "3", null, { timeout: 20000 });
+  await page.click("#btnViewScroll");
+  await page.waitForFunction(
+    () => document.querySelectorAll('#pageStream .page[data-page="2"] .text-layer .w').length > 0,
+    null,
+    { timeout: 15000 },
+  );
+
+  await page.click('.tool[data-tool="highlight"]');
+  await page.evaluate(() => {
+    const word = document.querySelector('#pageStream .page[data-page="2"] .text-layer .w');
+    const range = document.createRange();
+    range.selectNodeContents(word);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  });
+
+  await page.waitForFunction(
+    () => document.querySelectorAll('#pageStream .page[data-page="2"] .annot-layer .hl').length > 0,
+    null,
+    { timeout: 10000 },
+  );
+  const others = await page.evaluate(
+    () => document.querySelectorAll('#pageStream .page:not([data-page="2"]) .annot-layer .hl').length,
+  );
+  assert.equal(others, 0, "the highlight belongs to the page it was drawn on");
+  assert.match(await page.textContent("#toast"), /Highlight added\./);
+});
+
+test("the toolbar can choose whether PDF links open in the reader", async (t) => {
+  const sample = await makeSamplePdf();
+  const { server, origin } = await startServer(sample);
+  const browser = await chromium.launch();
+  t.after(async () => {
+    await browser.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const page = await browser.newPage();
+  await page.goto(`${origin}/src/viewer.html`);
+  await page.waitForSelector("#emptyState:visible");
+
+  assert.equal(await page.getAttribute("#btnAutoOpen", "aria-pressed"), "true", "PDFs are taken over by default");
+  await page.click("#btnAutoOpen");
+  assert.equal(await page.getAttribute("#btnAutoOpen", "aria-pressed"), "false");
+  assert.match(await page.textContent("#toast"), /open in Chrome's viewer/);
+  assert.match(await page.textContent("#autoOpenHint"), /Chrome's own viewer/);
+  let stored = await page.evaluate(() => JSON.parse(localStorage.getItem("pdfreader.settings")));
+  assert.equal(stored.autoOpenPdf, false);
+
+  // The choice is what the service worker reads on the next PDF link.
+  await page.reload();
+  await page.waitForSelector("#emptyState:visible");
+  assert.equal(await page.getAttribute("#btnAutoOpen", "aria-pressed"), "false");
+  assert.match(await page.textContent("#autoOpenHint"), /Chrome's own viewer/);
+
+  await page.click("#btnAutoOpen");
+  stored = await page.evaluate(() => JSON.parse(localStorage.getItem("pdfreader.settings")));
+  assert.equal(stored.autoOpenPdf, true);
+  assert.equal(await page.getAttribute("#btnAutoOpen", "aria-pressed"), "true");
+});
+
+test("pages far down the scrolling column are released and drawn again on the way back", async (t) => {
+  const sample = await makeLongPdf(12);
+  const { server, origin } = await startServer(sample);
+  const browser = await chromium.launch();
+  t.after(async () => {
+    await browser.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const page = await browser.newPage();
+  await page.goto(`${origin}/src/viewer.html?file=${origin}/sample.pdf`);
+  await page.waitForFunction(() => document.querySelector("#pageTotal")?.textContent === "12", null, { timeout: 20000 });
+  await page.click("#btnViewScroll");
+  await page.waitForFunction(() => document.querySelectorAll("#pageStream .page").length === 12, null, { timeout: 10000 });
+  await page.waitForFunction(
+    () => (document.querySelector('#pageStream .page[data-page="1"] .pdf-canvas')?.width ?? 0) > 300,
+    null,
+    { timeout: 20000 },
+  );
+
+  // Jump to the end: the first page is now far away and its bitmap is freed.
+  await page.fill("#pageInput", "12");
+  await page.press("#pageInput", "Enter");
+  await page.waitForFunction(
+    () => document.querySelectorAll('#pageStream .page[data-page="12"] .text-layer .w').length > 0,
+    null,
+    { timeout: 20000 },
+  );
+  await page.waitForFunction(
+    () => (document.querySelector('#pageStream .page[data-page="1"] .pdf-canvas')?.width ?? 0) === 0,
+    null,
+    { timeout: 15000 },
+  );
+
+  // Coming back draws it again from scratch.
+  await page.fill("#pageInput", "1");
+  await page.press("#pageInput", "Enter");
+  await page.waitForFunction(
+    () => {
+      const canvas = document.querySelector('#pageStream .page[data-page="1"] .pdf-canvas');
+      const words = document.querySelectorAll('#pageStream .page[data-page="1"] .text-layer .w');
+      return (canvas?.width ?? 0) > 300 && words.length > 0;
+    },
+    null,
+    { timeout: 20000 },
+  );
+  assert.match(await page.textContent('#pageStream .page[data-page="1"] .text-layer'), /Page 1 marker/);
+});

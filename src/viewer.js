@@ -47,6 +47,11 @@ const ui = {
   prevPage: $("btnPrevPage"),
   nextPage: $("btnNextPage"),
   btnReader: $("btnReader"),
+  stream: $("pageStream"),
+  btnViewPaged: $("btnViewPaged"),
+  btnViewScroll: $("btnViewScroll"),
+  btnAutoOpen: $("btnAutoOpen"),
+  autoOpenHint: $("autoOpenHint"),
 };
 
 const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
@@ -72,12 +77,9 @@ const state = {
   range: null,
   chunks: [],
   lastWord: null,
-  wordMap: [],
+  viewMode: "paged",
 };
 
-let pageProxy = null;
-let viewport = null;
-let renderSeq = 0;
 let liveStroke = null;
 let followBusy = false;
 let transcriptEls = [];
@@ -204,6 +206,225 @@ function fromNorm(page, vp, nx, ny) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Page views                                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * One page on screen: its element, its canvases, and the pdf.js page and
+ * viewport behind them. Page mode keeps a single view (the markup already in
+ * viewer.html); scroll mode makes one per page and renders each as it comes
+ * into view.
+ */
+function makeView(visible, parts) {
+  const view = {
+    visible,
+    root: parts.root,
+    canvas: parts.canvas,
+    textLayer: parts.textLayer,
+    inkCanvas: parts.inkCanvas,
+    annotLayer: parts.annotLayer,
+    proxy: null,
+    viewport: null,
+    scale: 1,
+    wordMap: [],
+    rendered: false,
+    rendering: null,
+    seq: 0,
+  };
+  wireView(view);
+  return view;
+}
+
+const pagedView = makeView(0, {
+  root: ui.pageWrap,
+  canvas: ui.canvas,
+  textLayer: ui.textLayer,
+  inkCanvas: ui.inkCanvas,
+  annotLayer: ui.annotLayer,
+});
+
+/** The page views in the continuous layout, keyed by the page number shown. */
+const streamViews = new Map();
+let streamObserver = null;
+let scrollTick = 0;
+
+const isScroll = () => state.viewMode === "scroll";
+const isLive = (view) => Boolean(view?.proxy && view?.viewport);
+const activeView = () => (isScroll() ? streamViews.get(state.pageNumber) ?? null : pagedView);
+const allViews = () => (isScroll() ? [...streamViews.values()] : [pagedView]);
+
+function resetView(view) {
+  view.seq++;
+  view.rendered = false;
+  view.rendering = null;
+  view.proxy = null;
+  view.viewport = null;
+  view.wordMap = [];
+}
+
+/** Pointers are wired per page, so every page can be drawn on, not just one. */
+function wireView(view) {
+  view.root.addEventListener("pointerdown", (event) => {
+    if (state.tool !== "text") return;
+    if (event.target.closest("[data-annot]") && event.target.isContentEditable) return;
+    createTextBox(event, view);
+  });
+
+  view.root.addEventListener("click", (event) => {
+    if (state.tool !== "erase") return;
+    const node = event.target.closest("[data-annot]");
+    if (node) removeAnnotation(node.dataset.annot);
+  });
+
+  view.inkCanvas.addEventListener("pointerdown", (event) => {
+    if (state.tool === "pen") startInk(event, view);
+    else if (state.tool === "erase") eraseAt(event, view);
+  });
+  view.inkCanvas.addEventListener("pointermove", (event) => moveInk(event, view));
+  view.inkCanvas.addEventListener("pointerup", (event) => endInk(event, view));
+  view.inkCanvas.addEventListener("pointercancel", (event) => endInk(event, view));
+}
+
+/** The page view a DOM node belongs to, or null when it belongs to none. */
+function viewForNode(node) {
+  const element = node instanceof Element ? node : node?.parentElement;
+  const root = element?.closest(".page");
+  if (!root) return null;
+  if (root === ui.pageWrap) return pagedView;
+  return streamViews.get(Number(root.dataset.page)) ?? null;
+}
+
+function createStreamView(visible) {
+  const root = document.createElement("div");
+  root.className = "page";
+  root.dataset.page = String(visible);
+  root.dataset.tool = state.tool;
+  root.dataset.placeholder = "1";
+
+  const canvas = document.createElement("canvas");
+  canvas.className = "pdf-canvas";
+  const textLayer = document.createElement("div");
+  textLayer.className = "text-layer";
+  textLayer.setAttribute("aria-hidden", "true");
+  const inkCanvas = document.createElement("canvas");
+  inkCanvas.className = "ink-canvas";
+  const annotLayer = document.createElement("div");
+  annotLayer.className = "annot-layer";
+  root.append(canvas, textLayer, inkCanvas, annotLayer);
+
+  return makeView(visible, { root, canvas, textLayer, inkCanvas, annotLayer });
+}
+
+function disposeStream() {
+  if (streamObserver) streamObserver.disconnect();
+  streamObserver = null;
+  // Bumping the sequence leaves any render still in flight with nothing to draw.
+  for (const view of streamViews.values()) view.seq++;
+  streamViews.clear();
+  ui.stream.replaceChildren();
+}
+
+async function buildStream() {
+  disposeStream();
+  if (!state.doc) return;
+  streamObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        const view = streamViews.get(Number(entry.target.dataset.page));
+        if (view) void ensureRendered(view);
+      }
+    },
+    // Render well before a page is on screen, so scrolling does not show blanks.
+    { root: ui.stage, rootMargin: "900px 0px" },
+  );
+  for (let visible = 1; visible <= state.pageOrder.length; visible++) {
+    const view = createStreamView(visible);
+    streamViews.set(visible, view);
+    ui.stream.append(view.root);
+    streamObserver.observe(view.root);
+  }
+  await ensureRendered(streamViews.get(state.pageNumber) ?? streamViews.get(1));
+  scrollToPage(state.pageNumber);
+}
+
+/**
+ * Jump the stage to a page. The jump is instant on purpose: an animated scroll
+ * passes over the pages in between, which changes the page number and lets the
+ * page being scrolled to be released again before it is reached.
+ */
+function scrollToPage(visible) {
+  const view = streamViews.get(visible);
+  if (!view) return;
+  ui.stage.scrollTop = Math.max(0, view.root.offsetTop - 24);
+}
+
+/** Keep the page number in step with what the reader is looking at. */
+function onStageScroll() {
+  if (!isScroll() || !state.doc || scrollTick) return;
+  scrollTick = requestAnimationFrame(() => {
+    scrollTick = 0;
+    if (!isScroll() || !state.doc) return;
+    const stageTop = ui.stage.getBoundingClientRect().top;
+    const line = stageTop + Math.min(120, ui.stage.clientHeight * 0.25);
+    let visible = state.pageNumber;
+    for (const view of streamViews.values()) {
+      const rect = view.root.getBoundingClientRect();
+      if (rect.top > line) break;
+      visible = view.visible;
+    }
+    if (visible !== state.pageNumber) {
+      state.pageNumber = visible;
+      updatePageUi();
+      const view = streamViews.get(visible);
+      if (view) ui.zoomLabel.textContent = `${Math.round(view.scale * 100)}%`;
+    }
+    releaseDistantPages();
+  });
+}
+
+/**
+ * Free the bitmaps of pages that are well away from the screen, so a long
+ * document does not keep every page it has passed in memory. The page boxes
+ * keep their size, so nothing moves; a released page is drawn again by the
+ * observer as soon as it comes back into view.
+ */
+function releaseDistantPages() {
+  if (!isScroll()) return;
+  const stageRect = ui.stage.getBoundingClientRect();
+  const margin = Math.max(1200, ui.stage.clientHeight * 2);
+  for (const view of streamViews.values()) {
+    if (!view.rendered) continue;
+    const rect = view.root.getBoundingClientRect();
+    if (rect.bottom > stageRect.top - margin && rect.top < stageRect.bottom + margin) continue;
+    resetView(view);
+    view.canvas.width = 0;
+    view.canvas.height = 0;
+    view.inkCanvas.width = 0;
+    view.inkCanvas.height = 0;
+    view.textLayer.replaceChildren();
+    view.annotLayer.replaceChildren();
+  }
+}
+
+/** Switch between one page at a time and a continuous, scrolling layout. */
+async function setViewMode(mode, { persist = true } = {}) {
+  state.viewMode = mode === "scroll" ? "scroll" : "paged";
+  ui.btnViewPaged.setAttribute("aria-pressed", String(state.viewMode === "paged"));
+  ui.btnViewScroll.setAttribute("aria-pressed", String(state.viewMode === "scroll"));
+  ui.pageWrap.hidden = isScroll();
+  ui.stream.hidden = !isScroll();
+  if (persist) saveSettings({ viewMode: state.viewMode }).catch(() => {});
+  if (isScroll()) {
+    await buildStream();
+  } else {
+    disposeStream();
+    if (state.doc) await renderPage();
+  }
+  setTool(state.tool);
+}
+
+/* ------------------------------------------------------------------ */
 /* Document lifecycle                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -237,9 +458,8 @@ function teardownDocument() {
   ui.canvas.height = 0;
   ui.inkCanvas.width = 0;
   ui.inkCanvas.height = 0;
-  pageProxy = null;
-  viewport = null;
-  state.wordMap = [];
+  resetView(pagedView);
+  disposeStream();
 }
 
 async function openBytes(bytes, name, sourceUrl = "") {
@@ -287,7 +507,7 @@ async function openBytes(bytes, name, sourceUrl = "") {
   ui.pageInput.value = 1;
   ui.save.disabled = false;
 
-  await renderPage();
+  await refreshStage({ rebuild: true });
   buildThumbs();
   updateRangePreview();
   state.dirty = false;
@@ -376,61 +596,104 @@ async function getPageTextData(pageNumber) {
   return data;
 }
 
+/** Draw the single page of the page layout, starting from scratch. */
 async function renderPage() {
   if (!state.doc) return;
-  const seq = ++renderSeq;
-  const pageNo = state.pageNumber;
-  const page = await getPage(visibleToOriginal(pageNo));
-  if (seq !== renderSeq) return;
+  pagedView.visible = state.pageNumber;
+  await ensureRendered(pagedView, { fresh: true });
+}
 
-  const extra = state.rotations[visibleToOriginal(pageNo)] ?? 0;
+/**
+ * Render a page view unless it is already on screen. `fresh` throws away the
+ * current picture first, which is what zoom, resize and page changes need.
+ */
+async function ensureRendered(view, { fresh = false } = {}) {
+  if (!view || !state.doc) return null;
+  if (fresh) {
+    view.rendered = false;
+    view.seq++;
+    view.rendering = null;
+  }
+  if (view.rendered) return view;
+  if (!view.rendering) {
+    const task = renderView(view).catch((error) => {
+      console.warn("[PDF Reader] the page could not be drawn", error);
+      return view;
+    });
+    view.rendering = task;
+    task.finally(() => {
+      if (view.rendering === task) view.rendering = null;
+    });
+  }
+  await view.rendering;
+  return view;
+}
+
+async function renderView(view) {
+  const seq = ++view.seq;
+  const original = visibleToOriginal(view.visible);
+  if (!original) return view;
+  const page = await getPage(original);
+  if (seq !== view.seq) return view;
+
+  const extra = state.rotations[original] ?? 0;
   const rotation = (((page.rotate ?? 0) + extra) % 360 + 360) % 360;
   const base = page.getViewport({ scale: 1, rotation });
   if (state.zoomMode === "fit") {
+    // Each page fills the width of its own slot, so a document with mixed page
+    // sizes stays readable either way round.
     const available = Math.max(200, ui.stage.clientWidth - 48);
-    state.scale = clamp(available / base.width, 0.1, 4);
+    view.scale = clamp(available / base.width, 0.1, 4);
+  } else {
+    view.scale = state.scale;
   }
-  const vp = page.getViewport({ scale: state.scale, rotation });
-  pageProxy = page;
-  viewport = vp;
+  const vp = page.getViewport({ scale: view.scale, rotation });
+  view.proxy = page;
+  view.viewport = vp;
+  delete view.root.dataset.placeholder;
 
   const dpr = Math.min(2, window.devicePixelRatio || 1);
-  ui.canvas.width = Math.max(1, Math.floor(vp.width * dpr));
-  ui.canvas.height = Math.max(1, Math.floor(vp.height * dpr));
-  ui.canvas.style.width = `${vp.width}px`;
-  ui.canvas.style.height = `${vp.height}px`;
-  ui.inkCanvas.width = ui.canvas.width;
-  ui.inkCanvas.height = ui.canvas.height;
-  ui.inkCanvas.style.width = `${vp.width}px`;
-  ui.inkCanvas.style.height = `${vp.height}px`;
-  ui.textLayer.style.width = `${vp.width}px`;
-  ui.textLayer.style.height = `${vp.height}px`;
-  ui.pageWrap.style.width = `${vp.width}px`;
-  ui.pageWrap.style.height = `${vp.height}px`;
+  view.canvas.width = Math.max(1, Math.floor(vp.width * dpr));
+  view.canvas.height = Math.max(1, Math.floor(vp.height * dpr));
+  view.canvas.style.width = `${vp.width}px`;
+  view.canvas.style.height = `${vp.height}px`;
+  view.inkCanvas.width = view.canvas.width;
+  view.inkCanvas.height = view.canvas.height;
+  view.inkCanvas.style.width = `${vp.width}px`;
+  view.inkCanvas.style.height = `${vp.height}px`;
+  view.textLayer.style.width = `${vp.width}px`;
+  view.textLayer.style.height = `${vp.height}px`;
+  view.root.style.width = `${vp.width}px`;
+  view.root.style.height = `${vp.height}px`;
 
-  const ctx = ui.canvas.getContext("2d");
+  const ctx = view.canvas.getContext("2d");
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.clearRect(0, 0, ui.canvas.width, ui.canvas.height);
+  ctx.clearRect(0, 0, view.canvas.width, view.canvas.height);
   await page.render({ canvasContext: ctx, viewport: vp, transform: [dpr, 0, 0, dpr, 0, 0] }).promise;
-  if (seq !== renderSeq) return;
+  if (seq !== view.seq) return view;
 
-  const textData = await getPageTextData(visibleToOriginal(pageNo));
-  if (seq !== renderSeq) return;
-  buildTextLayer(vp, textData);
+  const textData = await getPageTextData(original);
+  if (seq !== view.seq) return view;
+  buildTextLayer(view, vp, textData);
+  view.rendered = true;
 
-  drawInk();
-  renderAnnotations();
-  updatePageUi();
-  ui.zoomLabel.textContent = `${Math.round(state.scale * 100)}%`;
-
-  if (state.lastWord && state.lastWord.page === state.pageNumber) {
-    highlightWord(state.lastWord.raw);
+  drawInk(view);
+  renderAnnotations(view);
+  if (view === pagedView) state.scale = view.scale;
+  if (view === activeView()) {
+    ui.zoomLabel.textContent = `${Math.round(view.scale * 100)}%`;
+    updatePageUi();
   }
+
+  if (state.lastWord && state.lastWord.page === view.visible) {
+    highlightWord(view, state.lastWord.raw);
+  }
+  return view;
 }
 
-function buildTextLayer(vp, textData) {
-  ui.textLayer.replaceChildren();
-  state.wordMap = [];
+function buildTextLayer(view, vp, textData) {
+  view.textLayer.replaceChildren();
+  view.wordMap = [];
   const frag = document.createDocumentFragment();
 
   for (const item of textData.items) {
@@ -477,11 +740,11 @@ function buildTextLayer(vp, textData) {
     if (last < item.str.length) span.append(document.createTextNode(item.str.slice(last)));
 
     frag.append(span);
-    state.wordMap.push(...words);
+    view.wordMap.push(...words);
   }
 
-  ui.textLayer.append(frag);
-  state.wordMap.sort((a, b) => a.start - b.start);
+  view.textLayer.append(frag);
+  view.wordMap.sort((a, b) => a.start - b.start);
 }
 
 /* ------------------------------------------------------------------ */
@@ -510,7 +773,7 @@ function restore(entry) {
   state.dirty = true;
   state.pageNumber = clamp(state.pageNumber, 1, Math.max(1, state.pageOrder.length));
   buildThumbs();
-  renderPage();
+  void refreshStage({ rebuild: true });
   scheduleRangePreview();
   updateUndoButton();
 }
@@ -530,10 +793,10 @@ function addHighlightFromSelection() {
   const selection = window.getSelection();
   if (!selection || selection.isCollapsed || !selection.rangeCount) return false;
   const range = selection.getRangeAt(0);
-  if (!ui.textLayer.contains(range.commonAncestorContainer)) return false;
-  if (!pageProxy || !viewport) return false;
+  const view = viewForNode(range.commonAncestorContainer);
+  if (!view || !isLive(view) || !view.textLayer.contains(range.commonAncestorContainer)) return false;
 
-  const pageRect = ui.pageWrap.getBoundingClientRect();
+  const pageRect = view.root.getBoundingClientRect();
   const rects = [];
   for (const r of range.getClientRects()) {
     const left = Math.max(r.left, pageRect.left);
@@ -541,8 +804,8 @@ function addHighlightFromSelection() {
     const top = Math.max(r.top, pageRect.top);
     const bottom = Math.min(r.bottom, pageRect.bottom);
     if (right - left < 1 || bottom - top < 1) continue;
-    const a = toNorm(pageProxy, viewport, left - pageRect.left, top - pageRect.top);
-    const b = toNorm(pageProxy, viewport, right - pageRect.left, bottom - pageRect.top);
+    const a = toNorm(view.proxy, view.viewport, left - pageRect.left, top - pageRect.top);
+    const b = toNorm(view.proxy, view.viewport, right - pageRect.left, bottom - pageRect.top);
     rects.push({
       x: Math.min(a[0], b[0]),
       y: Math.min(a[1], b[1]),
@@ -555,31 +818,40 @@ function addHighlightFromSelection() {
   pushHistory();
   state.annotations.push({
     id: uid(),
-    page: visibleToOriginal(state.pageNumber),
+    page: visibleToOriginal(view.visible),
     type: "highlight",
     color: state.color,
     rects,
   });
   state.dirty = true;
   selection.removeAllRanges();
-  renderAnnotations();
+  refreshOverlays();
   toast("Highlight added.");
   return true;
 }
 
-function renderAnnotations() {
-  ui.annotLayer.replaceChildren();
-  if (!pageProxy || !viewport) return;
-  const original = visibleToOriginal(state.pageNumber);
-  const vp = viewport;
+/** Redraw the ink and annotations of every page that is on screen. */
+function refreshOverlays() {
+  for (const view of allViews()) {
+    if (!isLive(view)) continue;
+    drawInk(view);
+    renderAnnotations(view);
+  }
+}
+
+function renderAnnotations(view) {
+  view.annotLayer.replaceChildren();
+  if (!isLive(view)) return;
+  const original = visibleToOriginal(view.visible);
+  const vp = view.viewport;
 
   for (const a of state.annotations) {
     if (a.page !== original) continue;
 
     if (a.type === "highlight") {
       for (const r of a.rects) {
-        const bottomLeft = fromNorm(pageProxy, vp, r.x, r.y);
-        const topRight = fromNorm(pageProxy, vp, r.x + r.w, r.y + r.h);
+        const bottomLeft = fromNorm(view.proxy, vp, r.x, r.y);
+        const topRight = fromNorm(view.proxy, vp, r.x + r.w, r.y + r.h);
         const left = Math.min(bottomLeft[0], topRight[0]);
         const top = Math.min(bottomLeft[1], topRight[1]);
         const width = Math.abs(topRight[0] - bottomLeft[0]);
@@ -593,13 +865,13 @@ function renderAnnotations() {
         div.style.height = `${height}px`;
         div.style.background = a.color;
         div.style.opacity = "0.38";
-        ui.annotLayer.append(div);
+        view.annotLayer.append(div);
       }
       continue;
     }
 
     if (a.type === "text") {
-      const point = fromNorm(pageProxy, vp, a.x, a.y);
+      const point = fromNorm(view.proxy, vp, a.x, a.y);
       const fontPx = Math.max(6, a.fontSize * vp.height);
       const div = document.createElement("div");
       div.className = "tx";
@@ -625,41 +897,42 @@ function renderAnnotations() {
       div.addEventListener("blur", () => {
         if (!div.textContent.trim()) {
           state.annotations = state.annotations.filter((x) => x.id !== a.id);
-          renderAnnotations();
+          refreshOverlays();
         }
         state.dirty = true;
       });
-      ui.annotLayer.append(div);
+      view.annotLayer.append(div);
     }
   }
 }
 
-function drawInk() {
-  const ctx = ui.inkCanvas.getContext("2d");
+function drawInk(view) {
+  const ctx = view.inkCanvas.getContext("2d");
   const dpr = Math.min(2, window.devicePixelRatio || 1);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.clearRect(0, 0, ui.inkCanvas.width, ui.inkCanvas.height);
+  ctx.clearRect(0, 0, view.inkCanvas.width, view.inkCanvas.height);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
 
-  if (!pageProxy || !viewport) return;
-  const original = visibleToOriginal(state.pageNumber);
+  if (!isLive(view)) return;
+  const original = visibleToOriginal(view.visible);
   const strokes = state.annotations.filter((a) => a.type === "ink" && a.page === original);
-  if (liveStroke) strokes.push(liveStroke);
+  // The stroke being drawn belongs to the page it started on, and nowhere else.
+  if (liveStroke && liveStroke.page === original) strokes.push(liveStroke);
 
   for (const stroke of strokes) {
     if (!stroke.points.length) continue;
     ctx.strokeStyle = stroke.color;
-    ctx.lineWidth = Math.max(0.6, stroke.strokeWidth * viewport.height);
+    ctx.lineWidth = Math.max(0.6, stroke.strokeWidth * view.viewport.height);
     ctx.beginPath();
     stroke.points.forEach((point, i) => {
-      const [x, y] = fromNorm(pageProxy, viewport, point[0], point[1]);
+      const [x, y] = fromNorm(view.proxy, view.viewport, point[0], point[1]);
       if (i === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
     });
     if (stroke.points.length === 1) {
-      const [x, y] = fromNorm(pageProxy, viewport, stroke.points[0][0], stroke.points[0][1]);
+      const [x, y] = fromNorm(view.proxy, view.viewport, stroke.points[0][0], stroke.points[0][1]);
       ctx.lineTo(x + 0.1, y);
     }
     ctx.stroke();
@@ -672,8 +945,7 @@ function removeAnnotation(id) {
   pushHistory();
   state.annotations = state.annotations.filter((a) => a.id !== id);
   state.dirty = true;
-  renderAnnotations();
-  drawInk();
+  refreshOverlays();
 }
 
 /* ------------------------------------------------------------------ */
@@ -683,6 +955,7 @@ function removeAnnotation(id) {
 function setTool(tool) {
   state.tool = tool;
   ui.pageWrap.dataset.tool = tool;
+  for (const view of allViews()) view.root.dataset.tool = tool;
   for (const button of document.querySelectorAll(".tool")) {
     button.classList.toggle("active", button.dataset.tool === tool);
   }
@@ -693,7 +966,14 @@ function setTool(tool) {
 async function goToPage(pageNumber) {
   if (!state.doc) return;
   const target = clampInt(pageNumber, 1, Math.max(1, state.pageOrder.length));
-  if (target === state.pageNumber && pageProxy) {
+  if (isScroll()) {
+    state.pageNumber = target;
+    const view = await ensureRendered(streamViews.get(target));
+    if (view) scrollToPage(target);
+    updatePageUi();
+    return;
+  }
+  if (target === state.pageNumber && isLive(pagedView)) {
     updatePageUi();
     return;
   }
@@ -701,7 +981,29 @@ async function goToPage(pageNumber) {
   await renderPage();
 }
 
+/**
+ * Redraw the open document after the zoom, the window or the pages themselves
+ * changed. `rebuild` also replaces the page elements, which is needed when the
+ * page order or a rotation changed.
+ */
+async function refreshStage({ rebuild = false } = {}) {
+  if (!state.doc) return;
+  if (!isScroll()) {
+    await renderPage();
+    return;
+  }
+  if (rebuild || streamViews.size !== state.pageOrder.length) {
+    await buildStream();
+    return;
+  }
+  // Every page that is on screen has to be drawn again at the new zoom.
+  await Promise.all(
+    [...streamViews.values()].filter((view) => view.rendered).map((view) => ensureRendered(view, { fresh: true })),
+  );
+}
+
 function updatePageUi() {
+  if (!state.doc) return;
   const total = state.pageOrder.length;
   ui.pageInput.value = String(state.pageNumber);
   ui.pageTotal.textContent = String(total);
@@ -715,9 +1017,12 @@ function updatePageUi() {
 }
 
 function setZoom(delta) {
+  // In the continuous layout each page fits its own width, so the first step
+  // away from fit has to start where the page actually is.
+  if (state.zoomMode === "fit") state.scale = activeView()?.scale ?? state.scale;
   state.zoomMode = "manual";
   state.scale = clamp(state.scale + delta, 0.15, 4);
-  renderPage();
+  void refreshStage();
 }
 
 /* ------------------------------------------------------------------ */
@@ -850,7 +1155,7 @@ function rotatePage(visible, delta) {
   state.rotations[original] = (((state.rotations[original] ?? 0) + delta) % 360 + 360) % 360;
   state.dirty = true;
   refreshThumb(visible);
-  if (visible === state.pageNumber) renderPage();
+  void refreshStage({ rebuild: true });
 }
 
 function deletePage(visible) {
@@ -864,7 +1169,7 @@ function deletePage(visible) {
   state.dirty = true;
   if (state.pageNumber > state.pageOrder.length) state.pageNumber = state.pageOrder.length;
   buildThumbs();
-  renderPage();
+  void refreshStage({ rebuild: true });
   scheduleRangePreview();
   toast(`Page ${visible} removed. Save the PDF to keep the change.`);
 }
@@ -879,7 +1184,7 @@ function movePage(fromVisible, toVisible) {
   state.dirty = true;
   state.pageNumber = toVisible;
   buildThumbs();
-  renderPage();
+  void refreshStage({ rebuild: true });
   scheduleRangePreview();
 }
 
@@ -1081,25 +1386,29 @@ function missingStartWord(inputs) {
     : "";
 }
 
-/** Text currently selected inside the page's text layer. */
-function selectedPageText() {
+/** The text selected inside one page's text layer, with that page's view. */
+function selectedPage() {
   const selection = window.getSelection();
-  if (!selection || selection.isCollapsed || !selection.rangeCount) return "";
+  if (!selection || selection.isCollapsed || !selection.rangeCount) return null;
   const range = selection.getRangeAt(0);
-  if (!ui.textLayer.contains(range.startContainer) || !ui.textLayer.contains(range.endContainer)) {
-    return "";
+  const view = viewForNode(range.startContainer);
+  if (!view || view !== viewForNode(range.endContainer) || !isLive(view)) return null;
+  if (!view.textLayer.contains(range.startContainer) || !view.textLayer.contains(range.endContainer)) {
+    return null;
   }
-  return selection.toString().replace(/\s+/g, " ").trim();
+  const text = selection.toString().replace(/\s+/g, " ").trim();
+  return text ? { text, view } : null;
 }
 
 /** Use the selected word as the start or end anchor for the page you are on. */
 function useSelectionAsAnchor(which) {
-  const text = selectedPageText();
-  if (!text) {
+  const selected = selectedPage();
+  if (!selected) {
     toast("Select a word or phrase on the page first.");
     return;
   }
-  const page = state.pageNumber;
+  const { text } = selected;
+  const page = selected.view.visible || state.pageNumber;
   // An empty bound means "first page" / "to the end", so only move bounds that
   // are actually set — otherwise picking a start word would silently cap an
   // open-ended range.
@@ -1337,20 +1646,23 @@ async function followReading(absolute) {
       followBusy = false;
     }
   }
-  if (location.pageNumber === state.pageNumber) highlightWord(location.raw);
+  // Highlight the word on its own page view, even if the page has not been
+  // drawn yet (a jump back to a page whose bitmap was released).
+  const view = isScroll() ? await ensureRendered(streamViews.get(location.pageNumber)) : pagedView;
+  if (isLive(view)) highlightWord(view, location.raw);
 }
 
-function highlightWord(rawOffset) {
-  if (!state.wordMap.length) return;
-  let previous = ui.textLayer.querySelector(".w.reading");
+function highlightWord(view, rawOffset) {
+  if (!view.wordMap.length) return;
+  let previous = view.textLayer.querySelector(".w.reading");
   if (previous) previous.classList.remove("reading");
 
   let found = null;
   let low = 0;
-  let high = state.wordMap.length - 1;
+  let high = view.wordMap.length - 1;
   while (low <= high) {
     const mid = (low + high) >> 1;
-    const entry = state.wordMap[mid];
+    const entry = view.wordMap[mid];
     if (rawOffset < entry.start) high = mid - 1;
     else if (rawOffset >= entry.end) low = mid + 1;
     else {
@@ -1358,7 +1670,7 @@ function highlightWord(rawOffset) {
       break;
     }
   }
-  if (!found) found = state.wordMap[clamp(low, 0, state.wordMap.length - 1)];
+  if (!found) found = view.wordMap[clamp(low, 0, view.wordMap.length - 1)];
 
   found.el.classList.add("reading");
   const wordRect = found.el.getBoundingClientRect();
@@ -1404,45 +1716,45 @@ async function savePdf() {
 /* Pointer input                                                       */
 /* ------------------------------------------------------------------ */
 
-function pagePoint(event) {
-  const rect = ui.pageWrap.getBoundingClientRect();
+function pagePoint(event, view) {
+  const rect = view.root.getBoundingClientRect();
   return { x: event.clientX - rect.left, y: event.clientY - rect.top };
 }
 
-function startInk(event) {
-  if (state.tool !== "pen" || !pageProxy || !viewport) return;
-  const point = pagePoint(event);
+function startInk(event, view) {
+  if (state.tool !== "pen" || !isLive(view)) return;
+  const point = pagePoint(event, view);
   liveStroke = {
     id: uid(),
-    page: visibleToOriginal(state.pageNumber),
+    page: visibleToOriginal(view.visible),
     type: "ink",
     color: state.color,
-    strokeWidth: 1.8 / viewport.height,
-    points: [toNorm(pageProxy, viewport, point.x, point.y)],
+    strokeWidth: 1.8 / view.viewport.height,
+    points: [toNorm(view.proxy, view.viewport, point.x, point.y)],
   };
   try {
-    ui.inkCanvas.setPointerCapture(event.pointerId);
+    view.inkCanvas.setPointerCapture(event.pointerId);
   } catch {
     /* The pointer may already be gone; drawing still works without capture. */
   }
-  drawInk();
+  drawInk(view);
 }
 
-function moveInk(event) {
-  if (!liveStroke || state.tool !== "pen") return;
-  const point = pagePoint(event);
+function moveInk(event, view) {
+  if (!liveStroke || state.tool !== "pen" || !isLive(view)) return;
+  const point = pagePoint(event, view);
   const last = liveStroke.points[liveStroke.points.length - 1];
-  const next = toNorm(pageProxy, viewport, point.x, point.y);
+  const next = toNorm(view.proxy, view.viewport, point.x, point.y);
   if (Math.hypot(next[0] - last[0], next[1] - last[1]) < 0.0015) return;
   liveStroke.points.push(next);
-  drawInk();
+  drawInk(view);
 }
 
-function endInk(event) {
+function endInk(event, view) {
   if (!liveStroke) return;
-  if (event?.type === "pointerup") {
-    const point = pagePoint(event);
-    liveStroke.points.push(toNorm(pageProxy, viewport, point.x, point.y));
+  if (event?.type === "pointerup" && isLive(view)) {
+    const point = pagePoint(event, view);
+    liveStroke.points.push(toNorm(view.proxy, view.viewport, point.x, point.y));
   }
   if (liveStroke.points.length > 1) {
     pushHistory();
@@ -1450,28 +1762,28 @@ function endInk(event) {
     state.dirty = true;
   }
   liveStroke = null;
-  drawInk();
+  refreshOverlays();
 }
 
-function createTextBox(event) {
-  if (!pageProxy || !viewport) return;
-  const point = pagePoint(event);
-  const [nx, ny] = toNorm(pageProxy, viewport, point.x, point.y);
+function createTextBox(event, view) {
+  if (!isLive(view)) return;
+  const point = pagePoint(event, view);
+  const [nx, ny] = toNorm(view.proxy, view.viewport, point.x, point.y);
   pushHistory();
   const annotation = {
     id: uid(),
-    page: visibleToOriginal(state.pageNumber),
+    page: visibleToOriginal(view.visible),
     type: "text",
     color: state.color,
     x: nx,
     y: ny,
-    fontSize: 16 / viewport.height,
+    fontSize: 16 / view.viewport.height,
     text: "",
   };
   state.annotations.push(annotation);
   state.dirty = true;
-  renderAnnotations();
-  const node = ui.annotLayer.querySelector(`[data-annot="${annotation.id}"]`);
+  renderAnnotations(view);
+  const node = view.annotLayer.querySelector(`[data-annot="${annotation.id}"]`);
   if (node) {
     node.focus();
     const range = document.createRange();
@@ -1482,17 +1794,17 @@ function createTextBox(event) {
   }
 }
 
-function eraseAt(event) {
-  if (!pageProxy || !viewport) return;
-  const point = pagePoint(event);
-  const aspect = pageBox(pageProxy).w / pageBox(pageProxy).h;
-  const target = toNorm(pageProxy, viewport, point.x, point.y);
+function eraseAt(event, view) {
+  if (!isLive(view)) return;
+  const point = pagePoint(event, view);
+  const aspect = pageBox(view.proxy).w / pageBox(view.proxy).h;
+  const target = toNorm(view.proxy, view.viewport, point.x, point.y);
   const [tx, ty] = [target[0] * aspect, target[1]];
 
   let bestId = null;
   let bestDistance = Infinity;
   for (const annotation of state.annotations) {
-    if (annotation.type !== "ink" || annotation.page !== visibleToOriginal(state.pageNumber)) continue;
+    if (annotation.type !== "ink" || annotation.page !== visibleToOriginal(view.visible)) continue;
     const points = annotation.points.map(([x, y]) => [x * aspect, y]);
     for (let i = 1; i < points.length; i++) {
       const distance = pointSegmentDistance(tx, ty, points[i - 1], points[i]);
@@ -1537,6 +1849,29 @@ function applySettings() {
   fillVoices();
   reader.rate = Number(state.settings.rate) || 1;
   reader.voiceURI = state.settings.voiceURI || "";
+  applyAutoOpen();
+}
+
+/** The toolbar mirror of the “Open PDF links in PDF Reader” setting. */
+function applyAutoOpen() {
+  const on = state.settings.autoOpenPdf !== false;
+  ui.btnAutoOpen.setAttribute("aria-pressed", String(on));
+  ui.btnAutoOpen.title = on
+    ? "PDF links open in PDF Reader — click to let Chrome open them instead"
+    : "PDF links open in Chrome's viewer — click to open them in PDF Reader";
+  if (ui.autoOpenHint) {
+    ui.autoOpenHint.textContent = on
+      ? "PDF links you click open here too. Turn that off with “Open PDFs here” in the toolbar."
+      : "PDF links currently open in Chrome's own viewer. Drag a PDF here or use Open.";
+  }
+}
+
+function toggleAutoOpen() {
+  const on = state.settings.autoOpenPdf === false;
+  state.settings.autoOpenPdf = on;
+  applyAutoOpen();
+  saveSettings({ autoOpenPdf: on }).catch(() => {});
+  toast(on ? "PDF links will now open in PDF Reader." : "PDF links will now open in Chrome's viewer.");
 }
 
 function toggleReaderPanel(force) {
@@ -1569,7 +1904,7 @@ function wireEvents() {
   $("btnZoomOut").addEventListener("click", () => setZoom(-0.15));
   ui.zoomLabel.addEventListener("click", () => {
     state.zoomMode = "fit";
-    renderPage();
+    void refreshStage();
   });
 
   for (const button of document.querySelectorAll(".tool")) {
@@ -1646,31 +1981,15 @@ function wireEvents() {
     saveSettings({ voiceURI: ui.voiceSelect.value }).catch(() => {});
   });
 
-  // Selection -> highlight.
+  // Selection -> highlight. Page pointers are wired per page by wireView().
   document.addEventListener("mouseup", () => {
     if (state.tool === "highlight") addHighlightFromSelection();
   });
 
-  ui.pageWrap.addEventListener("pointerdown", (event) => {
-    if (state.tool === "text") {
-      if (event.target.closest("[data-annot]") && event.target.isContentEditable) return;
-      createTextBox(event);
-    }
-  });
-
-  ui.pageWrap.addEventListener("click", (event) => {
-    if (state.tool !== "erase") return;
-    const node = event.target.closest("[data-annot]");
-    if (node) removeAnnotation(node.dataset.annot);
-  });
-
-  ui.inkCanvas.addEventListener("pointerdown", (event) => {
-    if (state.tool === "pen") startInk(event);
-    else if (state.tool === "erase") eraseAt(event);
-  });
-  ui.inkCanvas.addEventListener("pointermove", moveInk);
-  ui.inkCanvas.addEventListener("pointerup", endInk);
-  ui.inkCanvas.addEventListener("pointercancel", endInk);
+  ui.btnViewPaged.addEventListener("click", () => void setViewMode("paged"));
+  ui.btnViewScroll.addEventListener("click", () => void setViewMode("scroll"));
+  ui.btnAutoOpen.addEventListener("click", toggleAutoOpen);
+  ui.stage.addEventListener("scroll", onStageScroll, { passive: true });
 
   // Drag and drop files.
   let dragDepth = 0;
@@ -1724,7 +2043,7 @@ function wireEvents() {
       if (event.key === "0") {
         event.preventDefault();
         state.zoomMode = "fit";
-        renderPage();
+        void refreshStage();
         return;
       }
     }
@@ -1755,7 +2074,7 @@ function wireEvents() {
   window.addEventListener("resize", () => {
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
-      if (state.doc && state.zoomMode === "fit") renderPage();
+      if (state.doc && state.zoomMode === "fit") void refreshStage();
     }, 180);
   });
 
@@ -1791,6 +2110,7 @@ async function boot() {
   state.settings = await loadSettings();
   applySettings();
   wireEvents();
+  await setViewMode(state.settings.viewMode === "scroll" ? "scroll" : "paged", { persist: false });
   if (!Reader.supported) {
     ui.readRange.disabled = true;
     ui.playPause.disabled = true;
