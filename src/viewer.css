@@ -470,8 +470,13 @@ main.reader-hidden #readerPanel {
   gap: 8px;
 }
 
+.reader-form label.unused {
+  opacity: 0.55;
+}
+
 .reader-form input[type="number"],
 .reader-form input[type="text"],
+.reader-form select,
 .voice-row select {
   background: #0f1219;
   color: var(--text);
@@ -484,6 +489,7 @@ main.reader-hidden #readerPanel {
 
 .reader-form input[type="text"]:focus,
 .reader-form input[type="number"]:focus,
+.reader-form select:focus,
 .voice-row select:focus {
   outline: none;
   border-color: var(--accent);

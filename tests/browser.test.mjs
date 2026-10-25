@@ -92,14 +92,15 @@ async function startServer(sample) {
 }
 
 /**
- * @param {number|{wordDelay?: number, fail?: string, silent?: boolean, failVoice?: string}} options
+ * @param {number|{wordDelay?: number, fail?: string, silent?: boolean, failVoice?: string, drop?: number}} options
  *   `fail` makes every utterance error with that reason, `silent` mimics Chrome
- *   swallowing an utterance without any event at all, and `failVoice` makes only
+ *   swallowing an utterance without any event at all, `drop` swallows only the
+ *   first N utterances (the engine-was-busy case), and `failVoice` makes only
  *   utterances using that voice fail.
  */
 const FAKE_TTS = (options = {}) => {
   const opts = typeof options === "number" ? { wordDelay: options } : options;
-  const { wordDelay = 25, fail = "", silent = false, failVoice = "" } = opts;
+  const { wordDelay = 25, fail = "", silent = false, failVoice = "", drop = 0 } = opts;
   class FakeUtterance {
     constructor(text) {
       this.text = text;
@@ -133,6 +134,12 @@ const FAKE_TTS = (options = {}) => {
       this.current = utterance;
       this.speaking = true;
       if (silent) return;
+      // Nothing at all happens to this utterance: no start, no end, no error.
+      if (window.__spoken.length <= drop) {
+        this.current = null;
+        this.speaking = false;
+        return;
+      }
       if (fail || (failVoice && utterance.voice?.voiceURI === failVoice)) {
         setTimeout(() => {
           this.speaking = false;
@@ -572,6 +579,85 @@ test("an engine that swallows the utterance is reported instead of hanging", asy
   );
   assert.equal(await page.textContent("#btnPlayPause"), "▶");
   assert.equal(await page.isDisabled("#btnStop"), true);
+});
+
+test("an utterance the engine drops is spoken again instead of being reported", async (t) => {
+  const sample = await makeSamplePdf();
+  const { server, origin } = await startServer(sample);
+  const browser = await chromium.launch();
+  t.after(async () => {
+    await browser.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const context = await browser.newContext();
+  // The first utterance is accepted and then forgotten, which is what Chrome
+  // does after a cancel while it is still tearing the previous one down.
+  await context.addInitScript(FAKE_TTS, { wordDelay: 6, drop: 1 });
+  const page = await context.newPage();
+
+  await page.goto(`${origin}/src/viewer.html?file=${origin}/sample.pdf`);
+  await page.waitForFunction(() => document.querySelector("#pageTotal")?.textContent === "3", null, { timeout: 20000 });
+  await page.click("#btnReadRange");
+
+  await page.waitForFunction(() => /^Read /.test(document.querySelector("#rangeStatus")?.textContent ?? ""), null, {
+    timeout: 25000,
+  });
+
+  const spoken = await page.evaluate(() => window.__spoken.join(" "));
+  assert.equal(await page.evaluate(() => window.__spoken.length > 1), true, "the chunk was never spoken again");
+  assert.match(spoken, /Chapter one/, "the reading carries on after the retry");
+  assert.doesNotMatch(
+    await page.textContent("#rangeStatus"),
+    /did not start/,
+    "a dropped utterance must not be reported as a broken engine",
+  );
+});
+
+test("the range preset decides where a reading starts and stops", async (t) => {
+  const sample = await makeSamplePdf();
+  const { server, origin } = await startServer(sample);
+  const browser = await chromium.launch();
+  t.after(async () => {
+    await browser.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const context = await browser.newContext();
+  await context.addInitScript(FAKE_TTS, 6);
+  const page = await context.newPage();
+
+  await page.goto(`${origin}/src/viewer.html?file=${origin}/sample.pdf`);
+  await page.waitForFunction(() => document.querySelector("#pageTotal")?.textContent === "3", null, { timeout: 20000 });
+
+  // "Word/phrase → end of its page": the To field is not used at all.
+  await page.selectOption("#rangeMode", "word-to-page");
+  assert.equal(await page.isDisabled("#endPage"), true, "To page is not used by this preset");
+  await page.fill("#startWord", "Beta");
+  await page.waitForFunction(
+    () => /Page 2 · from the start word/.test(document.querySelector("#rangeStatus")?.textContent ?? ""),
+    null,
+    { timeout: 20000 },
+  );
+
+  await page.click("#btnReadRange");
+  await page.waitForFunction(() => /^Read /.test(document.querySelector("#rangeStatus")?.textContent ?? ""), null, {
+    timeout: 25000,
+  });
+
+  const spoken = await page.evaluate(() => window.__spoken.join(" "));
+  assert.match(spoken, /^Beta marker appears here\./, "reading starts at the word");
+  assert.match(spoken, /The plot thickens slowly and then stops\./, "the rest of that page is read");
+  assert.doesNotMatch(spoken, /Gamma|Delta/, "reading stops at the end of the word's page");
+  assert.match(await page.textContent("#rangeStatus"), /^Read 2 of 2 pages/);
+
+  // Picking the plain range clears the anchors the preset no longer uses.
+  await page.selectOption("#rangeMode", "whole");
+  assert.equal(await page.inputValue("#startWord"), "");
+  assert.equal(await page.isDisabled("#endPage"), false);
+  await page.waitForFunction(() => /^Pages 1–3/.test(document.querySelector("#rangeStatus")?.textContent ?? ""), null, {
+    timeout: 20000,
+  });
 });
 
 test("a chosen voice that cannot speak falls back to the default voice", async (t) => {

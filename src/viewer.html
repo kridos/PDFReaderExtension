@@ -76,6 +76,16 @@
           <div class="panel-head"><span>Read aloud</span></div>
 
           <div class="reader-form">
+            <label>
+              Read
+              <select id="rangeMode">
+                <option value="whole">Whole range — start to end</option>
+                <option value="to-word">Start of range → word/phrase</option>
+                <option value="from-word">Word/phrase → end of range</option>
+                <option value="word-to-word">Word/phrase → word/phrase</option>
+                <option value="word-to-page">Word/phrase → end of its page</option>
+              </select>
+            </label>
             <div class="two">
               <label>From page<input id="startPage" type="number" min="1" placeholder="first page" /></label>
               <label>To page<input id="endPage" type="number" min="1" placeholder="end of document" /></label>
@@ -95,10 +105,11 @@
               </span>
             </label>
             <p class="hint">
-              Type a word or phrase to begin and end at, or select one on the page and press
-              <em>Use selection</em>. The first match inside the page range is used, so the whole
-              section never needs highlighting. Leave <em>To page</em> empty to keep reading to the
-              end of the document, and <em>From page</em> empty to start at the beginning.
+              Pick what to read from the list, then type the word or phrase it needs — or select one
+              on the page and press <em>Use selection</em>. The first match inside the page range is
+              used, so the whole section never needs highlighting. Leave <em>To page</em> empty to
+              keep reading to the end of the document, and <em>From page</em> empty to start at the
+              beginning. Dimmed fields are not used by the selected option.
             </p>
             <p id="rangeStatus" class="range-status">Open a PDF to set a reading range.</p>
             <div class="row">

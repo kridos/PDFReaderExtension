@@ -25,6 +25,7 @@ const ui = {
   zoomLabel: $("btnZoomLabel"),
   colorInput: $("colorInput"),
   rangeStatus: $("rangeStatus"),
+  rangeMode: $("rangeMode"),
   startPage: $("startPage"),
   endPage: $("endPage"),
   startWord: $("startWord"),
@@ -93,7 +94,12 @@ const reader = new Reader({
     const playing = s === "playing";
     ui.playPause.textContent = playing ? "❚❚" : "▶";
     ui.stop.disabled = s === "idle" || s === "ended";
-    if (s === "ended") ui.progressLabel.textContent = "Finished";
+    if (s === "ended") {
+      ui.progressLabel.textContent = "Finished";
+      // The summary waits for the voice to drain: the text being loaded is not
+      // the same thing as the range having been read out.
+      reportReadingFinished();
+    }
   },
   onProgress: ({ absolute, chunkIndex }) => {
     followReading(absolute);
@@ -123,7 +129,7 @@ function reportSpeechFailure(reason) {
   if (!voices) {
     message = "This browser has no voices installed, so nothing can be read aloud. Install a text-to-speech voice in your system settings.";
   } else if (reason === "did-not-start") {
-    message = "The speech engine did not start. Press play again, or pick another voice in Settings.";
+    message = `The speech engine did not start after a few tries (${voices} voice${voices === 1 ? "" : "s"} found). Pick a different voice in Settings, then press play again.`;
   } else if (reason === "not-allowed") {
     message = "The browser blocked speech. Click the page, then press play again.";
   } else if (reason === "synthesis-failed" || reason === "voice-unavailable") {
@@ -969,17 +975,8 @@ async function pumpReading() {
     }
     if (active !== feed) return;
     if (active.range.done || active.exhausted) {
-      // Nothing more is coming: let the queue drain and report the result.
+      // Nothing more is coming: let the queue drain, then report the result.
       reader.close();
-      if (!active.finished) {
-        active.finished = true;
-        const r = active.range;
-        const words = r.wordCount();
-        setRangeStatus(
-          `Read ${active.loaded} of ${active.span} pages · ${words.toLocaleString()} words.`,
-          "ok",
-        );
-      }
     }
   } finally {
     pumping = false;
@@ -991,8 +988,75 @@ function updateReadingStatus(active) {
   setRangeStatus(`Reading · ${active.loaded} of ${active.span} pages loaded`);
 }
 
+/** The voice has run out of queued text: report how much was read. */
+function reportReadingFinished() {
+  const active = feed;
+  if (!active || active.finished) return;
+  active.finished = true;
+  const words = active.range.wordCount();
+  setRangeStatus(`Read ${active.loaded} of ${active.span} pages · ${words.toLocaleString()} words.`, "ok");
+}
+
+/**
+ * Range presets. Each one decides which anchors are used, so the panel offers a
+ * plain choice instead of making you work out which fields to leave empty.
+ */
+const RANGE_MODES = {
+  whole: { usesStart: false, usesEnd: false, endsWithPage: false },
+  "to-word": { usesStart: false, usesEnd: true, endsWithPage: false },
+  "from-word": { usesStart: true, usesEnd: false, endsWithPage: false },
+  "word-to-word": { usesStart: true, usesEnd: true, endsWithPage: false },
+  "word-to-page": { usesStart: true, usesEnd: false, endsWithPage: true },
+};
+
+function currentMode() {
+  const mode = ui.rangeMode.value;
+  return RANGE_MODES[mode] ? mode : "whole";
+}
+
+/** Switch presets, clearing the anchors the new one does not use. */
+function setRangeMode(mode, { clear = true, notify = true } = {}) {
+  const id = RANGE_MODES[mode] ? mode : "whole";
+  const preset = RANGE_MODES[id];
+  ui.rangeMode.value = id;
+  if (clear) {
+    if (!preset.usesStart) ui.startWord.value = "";
+    if (!preset.usesEnd) ui.endWord.value = "";
+  }
+  // Fields the preset ignores are dimmed rather than removed: the form keeps
+  // its shape, and it stays obvious which anchors are being used.
+  ui.startWord.closest("label").classList.toggle("unused", !preset.usesStart);
+  ui.endWord.closest("label").classList.toggle("unused", !preset.usesEnd);
+  ui.endPage.disabled = preset.endsWithPage;
+  ui.endPage.placeholder = preset.endsWithPage ? "end of that page" : "end of document";
+  if (preset.endsWithPage) ui.endPage.value = "";
+  if (notify) {
+    // Choosing a preset is an edit of the range, so the status line goes back
+    // to describing what would be read.
+    rangeStatusLocked = false;
+    scheduleRangePreview();
+  }
+}
+
+/** Typing an anchor picks the preset that uses it. */
+function syncModeWithFields() {
+  const start = ui.startWord.value.trim();
+  const end = ui.endWord.value.trim();
+  const mode = currentMode();
+  if (start && end) {
+    if (mode !== "word-to-word") setRangeMode("word-to-word", { clear: false });
+  } else if (end) {
+    if (mode !== "to-word") setRangeMode("to-word", { clear: false });
+  } else if (start) {
+    // A start word with no end word keeps "end of that page" when it is chosen.
+    if (mode !== "from-word" && mode !== "word-to-page") setRangeMode("from-word", { clear: false });
+  }
+}
+
 function rangeInputs() {
   const total = Math.max(1, state.pageOrder.length);
+  const mode = currentMode();
+  const preset = RANGE_MODES[mode];
   // Both page fields are optional: an empty "To page" means "no stopping point",
   // so reading continues to the end of the document.
   const from = String(ui.startPage.value ?? "").trim();
@@ -1000,12 +1064,21 @@ function rangeInputs() {
   const startPage = from ? clampInt(from, 1, total) : 1;
   const endPage = to ? clampInt(to, 1, total) : total;
   return {
+    mode,
+    endsWithPage: preset.endsWithPage,
     startPage: Math.min(startPage, endPage),
     endPage: Math.max(startPage, endPage),
     openEnded: !to,
-    startWord: ui.startWord.value,
-    endWord: ui.endWord.value,
+    startWord: preset.usesStart ? ui.startWord.value : "",
+    endWord: preset.usesEnd ? ui.endWord.value : "",
   };
+}
+
+/** "Word/phrase → its page" needs a word to know where the page ends. */
+function missingStartWord(inputs) {
+  return inputs.endsWithPage && !normalizeQuery(inputs.startWord)
+    ? "Type a word or phrase to start at, or choose a different “Read” option."
+    : "";
 }
 
 /** Text currently selected inside the page's text layer. */
@@ -1040,6 +1113,8 @@ function useSelectionAsAnchor(which) {
     if (ui.startPage.value && Number(ui.startPage.value) > page) ui.startPage.value = String(page);
   }
   scheduleRangePreview();
+  // Picking an anchor implies a range that uses it, so the preset follows.
+  syncModeWithFields();
   const shown = text.length > 40 ? `${text.slice(0, 40)}…` : text;
   toast(`Range ${which} set to “${shown}”.`);
 }
@@ -1051,8 +1126,11 @@ function scheduleRangePreview() {
 
 function previewSummary(range, inputs) {
   const pages = `Pages ${inputs.startPage}–${inputs.endPage}`;
-  const bits = [inputs.openEnded ? `${pages} · to the end of the document` : pages];
-  if (range.startMatch) bits.push(`starts on page ${range.startMatch.pageNumber}`);
+  let where = pages;
+  if (inputs.endsWithPage) where = `Page ${inputs.endPage} · from the start word to the end of the page`;
+  else if (inputs.openEnded) where = `${pages} · to the end of the document`;
+  const bits = [where];
+  if (range.startMatch && !inputs.endsWithPage) bits.push(`starts on page ${range.startMatch.pageNumber}`);
   // Without an end word the range is fully described by its page numbers, and
   // guessing a duration would mean parsing every page first — which is the cost
   // this range is meant to avoid. The real word count appears once it is read.
@@ -1075,8 +1153,14 @@ async function updateRangePreview() {
     return;
   }
   const inputs = rangeInputs();
+  const missing = missingStartWord(inputs);
+  if (missing) {
+    setRangeStatus(missing, "error");
+    ui.readRange.disabled = true;
+    return;
+  }
   const span = inputs.endPage - inputs.startPage + 1;
-  if (span > 60) {
+  if (span > 60 && !inputs.endsWithPage) {
     const end = inputs.openEnded ? " (to the end of the document)" : "";
     setRangeStatus(`Pages ${inputs.startPage}–${inputs.endPage}${end}. Press “Read range” to start reading them.`);
     ui.readRange.disabled = !Reader.supported;
@@ -1090,6 +1174,10 @@ async function updateRangePreview() {
     setRangeStatus(start.error, "error");
     ui.readRange.disabled = true;
     return;
+  }
+  // The page the start word landed on is where "end of that page" stops.
+  if (inputs.endsWithPage && preview.range.startMatch) {
+    inputs.endPage = preview.range.startMatch.pageNumber;
   }
   // An end word can be anywhere up to the last page, so look for it page by page
   // and stop as soon as it turns up.
@@ -1125,6 +1213,11 @@ function stopReading() {
 async function startReading() {
   if (!state.doc) return;
   const inputs = rangeInputs();
+  const missing = missingStartWord(inputs);
+  if (missing) {
+    setRangeStatus(missing, "error");
+    return;
+  }
   stopReading();
   rangeStatusLocked = true;
   clearTranscript();
@@ -1141,6 +1234,11 @@ async function startReading() {
     if (!start.ok) {
       setRangeStatus(start.error, "error");
       return;
+    }
+    // "Word/phrase → end of that page": the anchor's page is the stop, so the
+    // page stream ends there no matter what the To field said.
+    if (inputs.endsWithPage && active.range.startMatch) {
+      inputs.endPage = active.range.startMatch.pageNumber;
     }
 
     reader.rate = Number(state.settings.rate) || 1;
@@ -1492,6 +1590,12 @@ function wireEvents() {
     if (chrome?.runtime?.openOptionsPage) chrome.runtime.openOptionsPage();
     else window.open(new URL("./options.html", import.meta.url).href, "_blank");
   });
+
+  ui.rangeMode.addEventListener("change", () => setRangeMode(ui.rangeMode.value));
+  setRangeMode(currentMode(), { clear: false });
+  for (const input of [ui.startWord, ui.endWord]) {
+    input.addEventListener("input", syncModeWithFields);
+  }
 
   for (const input of [ui.startPage, ui.endPage, ui.startWord, ui.endWord]) {
     const edited = () => {

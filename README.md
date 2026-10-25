@@ -14,7 +14,7 @@ rearrange pages and save a new copy.
 - **No build step** — the extension loads unpacked as-is; pdf.js and pdf-lib are
   vendored in `src/vendor/`.
 
-Status: version 0.1.0, in development. All automated suites pass (27 unit / 8
+Status: version 0.1.0, in development. All automated suites pass (27 unit / 10
 viewer / 2 extension tests — see [Testing](#testing)).
 
 ## Contents
@@ -65,7 +65,22 @@ After changing any source file, press **Reload** on the extension card in
 
 ## Reading a PDF range aloud
 
-Open a PDF, then use the **Read aloud** panel on the right:
+Open a PDF, then use the **Read aloud** panel on the right. Start with the
+**Read** list, which picks what the range is made of:
+
+| Read | Uses | Reads |
+| --- | --- | --- |
+| Whole range — start to end | page bounds only | the pages, top to bottom |
+| Start of range → word/phrase | To page bound + end word | from the top of the range up to the word |
+| Word/phrase → end of range | From page bound + start word | from the word onwards, to the end of the range |
+| Word/phrase → word/phrase | both words | from the first word to the second |
+| Word/phrase → end of its page | start word | from the word to the end of the page it is on |
+
+Fields the chosen option ignores are dimmed, and switching options clears the
+anchors it does not use. Typing into either word field (or pressing **Use
+selection**) selects the option that uses it, so the common cases need no
+dropdown work at all: “read from this paragraph to the end of the page” is
+**Word/phrase → end of its page** plus a word.
 
 - **From page / To page** — the inclusive page range. Both are optional:
   **To page** can be left empty for a range with no stopping point, which keeps
@@ -74,7 +89,8 @@ Open a PDF, then use the **Read aloud** panel on the right:
 - **Start at word** — reading begins at the first occurrence of this word or
   phrase inside the range. Leave it empty to start at the top of the first page.
   With an open-ended range, `From page` plus a start word is all you need: “read
-  from this paragraph onwards”.
+  from this paragraph onwards”. Under **Word/phrase → end of its page** the To
+  field is not used: the page the word was found on is where reading stops.
 - **End at word** — reading stops **right after** the first occurrence of this
   word or phrase that comes after the start point. Leave it empty to read to the
   end of the range.
@@ -117,8 +133,12 @@ line and a toast say what happened, for example `The speech engine could not
 produce sound (synthesis-failed). Pick a different voice in Settings, or slow the
 speed down.` If the voice you picked cannot speak, the sentence is retried on the
 default system voice and reading carries on. A sentence that neither starts nor
-reports an error within a few seconds is reported as `did not start` instead of
-leaving the player looking busy.
+reports an error is spoken again (twice, on a cleared queue), because Chrome
+drops the first utterance after a stop often enough to be worth the retry; only
+if all attempts stay silent is it reported as `did not start` instead of leaving
+the player looking busy. That message includes how many voices the browser lists,
+and the console gets a `[PDF Reader] speech failed` line with the engine state
+(`speaking`/`pending`/`paused`) so a stubborn machine can be diagnosed.
 
 ## Reading a web page
 
@@ -278,7 +298,7 @@ Minimal containers may need extra shared libraries and a fontconfig file; see
 
 ```bash
 npm test                # 27 tests: pure logic + real PDF bytes (Node only)
-npm run test:browser    # 8 tests: the viewer page and the settings page
+npm run test:browser    # 10 tests: the viewer page and the settings page
 npm run test:extension  # 2 tests: the loaded extension, PDFs and web pages
 ```
 
@@ -304,8 +324,13 @@ npm run test:extension  # 2 tests: the loaded extension, PDFs and web pages
   before it. Three more cover a speech engine that refuses every utterance (the
   status line and toast must explain why and the player must go back to idle), an
   engine that accepts an utterance and never reports anything (reported as `did
-  not start` rather than hanging), and a chosen voice that cannot speak (the
-  sentence is retried on the default voice and reading continues). Another opens
+  not start` rather than hanging), an engine that swallows only the first
+  utterance (the chunk is spoken again and the reading finishes without an error
+  message), and a chosen voice that cannot speak (the sentence is retried on the
+  default voice and reading continues). A further test picks **Word/phrase → end
+  of its page**, checks the To field is disabled, and reads from `Beta` to the
+  end of page 2 only — then switches back to the plain range and asserts the
+  start word is cleared. Another opens
   a PDF whose filename only exists in its `Content-Disposition` header and saves
   it untouched, checking the download keeps that name. A final test covers the
   empty state and the settings page.
@@ -332,23 +357,26 @@ after loading unpacked:
 1. Click a `.pdf` link: the viewer opens and renders the first page. Click a
    download link for a PDF (or right-click → **Save link as**): the file is
    saved, and the tab stays where it was.
-2. Enter a start page, end page, start word and end word: the status line shows
-   the anchor pages (and a word count when an end word is set), and **Read range**
-   starts speaking quickly, highlights the current word and turns pages. On a long
-   PDF the status line should read `Reading · N of M pages loaded` with a small N
-   rather than loading the whole range first. **Stop** ends it.
-3. Select a word in the PDF and press **Use selection**: the matching field fills
-   and the page bound moves.
-4. Draw with Pen, add a Text box, highlight a selection, undo once, then
+2. Pick **Word/phrase → word/phrase** in the **Read** list, enter a start page,
+   end page, start word and end word: the status line shows the anchor pages (and
+   a word count when an end word is set), and **Read range** starts speaking
+   quickly, highlights the current word and turns pages. On a long PDF the status
+   line should read `Reading · N of M pages loaded` with a small N rather than
+   loading the whole range first. **Stop** ends it.
+3. Switch the **Read** list to **Word/phrase → end of its page**: the To page field
+   dims, and a start word reads to the bottom of the page the word is on.
+4. Select a word in the PDF and press **Use selection**: the matching field fills,
+   the preset follows the field, and the page bound moves.
+5. Draw with Pen, add a Text box, highlight a selection, undo once, then
    **Save PDF** and open the downloaded file: edits are present and the name ends
    in `-edited.pdf`. Saving an untouched document keeps its original name.
-5. Rotate and delete a page in the thumbnail rail, save, and confirm the result.
-6. On a news article, click the extension icon: the panel reports a word count.
+6. Rotate and delete a page in the thumbnail rail, save, and confirm the result.
+7. On a news article, click the extension icon: the panel reports a word count.
    Set anchors, press **Read**, and confirm the page highlights and scrolls.
-7. On a `chrome://` page, click the icon: the empty PDF viewer opens. On a page
+8. On a `chrome://` page, click the icon: the empty PDF viewer opens. On a page
    that blocks injection (such as the Chrome Web Store), a brief “!” badge
    appears instead of a panel.
-8. Change voice and speed in Settings, then reopen the panel: the choices carry
+9. Change voice and speed in Settings, then reopen the panel: the choices carry
    over.
 
 ### Testing in a restricted container
