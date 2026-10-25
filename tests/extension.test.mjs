@@ -54,6 +54,13 @@ const ARTICLE = `<!doctype html>
   </body>
 </html>`;
 
+const DOWNLOAD_PAGE = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8" /><title>Downloads</title></head>
+<body>
+  <a id="attached" href="/attachment.pdf">Download the report</a>
+  <a id="forced" href="/sample.pdf" download>Save this PDF</a>
+</body></html>`;
+
 async function makeSamplePdf() {
   const doc = await PDFDocument.create();
   const font = await doc.embedFont(StandardFonts.Helvetica);
@@ -71,6 +78,19 @@ async function startServer(sample) {
     if (url.pathname === "/sample.pdf" || url.pathname === "/no-extension") {
       res.writeHead(200, { "content-type": "application/pdf" });
       res.end(Buffer.from(sample));
+      return;
+    }
+    if (url.pathname === "/attachment.pdf") {
+      res.writeHead(200, {
+        "content-type": "application/pdf",
+        "content-disposition": "attachment; filename*=UTF-8''Quarterly%20report.pdf",
+      });
+      res.end(Buffer.from(sample));
+      return;
+    }
+    if (url.pathname === "/download.html") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(DOWNLOAD_PAGE);
       return;
     }
     if (url.pathname === "/article" || url.pathname === "/article-tt") {
@@ -181,31 +201,16 @@ test("the loaded extension intercepts PDFs and opens its viewer", async (t) => {
     await new Promise((resolve) => server.close(resolve));
   });
 
-  // The redirect rule is installed by the service worker on first start.
-  await worker.evaluate(async () => {
-    for (let i = 0; i < 40; i++) {
-      const rules = await chrome.declarativeNetRequest.getDynamicRules();
-      if (rules.length) return;
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-  });
-  const rules = await worker.evaluate(async () => {
-    const dynamic = await chrome.declarativeNetRequest.getDynamicRules();
-    return dynamic.map((rule) => ({
-      filter: rule.condition.regexFilter,
-      substitution: rule.action.redirect?.regexSubstitution,
-      types: rule.condition.resourceTypes,
-    }));
-  });
-  assert.equal(rules.length, 1, "one redirect rule is installed");
-  assert.match(rules[0].filter, /pdf/);
-  assert.ok(rules[0].substitution.endsWith("?file=\\0"), `substitution was ${rules[0].substitution}`);
+  // No URL rewriting: a rule cannot tell a PDF to display from one to save, and
+  // hijacking .pdf URLs made download links open the viewer instead.
+  const permissions = await worker.evaluate(() => chrome.runtime.getManifest().permissions);
+  assert.equal(permissions.includes("declarativeNetRequest"), false);
 
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (err) => errors.push(err.message));
 
-  // 1. A .pdf URL is redirected by the declarative rule.
+  // 1. A PDF opened as a page is taken over from its response headers.
   await page.goto(`${origin}/sample.pdf`);
   await page.waitForURL(
     (url) => url.href.startsWith("chrome-extension://") && url.pathname.endsWith("/src/viewer.html"),
@@ -213,35 +218,51 @@ test("the loaded extension intercepts PDFs and opens its viewer", async (t) => {
   );
   const viewerUrl = new URL(page.url());
   assert.equal(viewerUrl.host, extensionId);
-  assert.equal(viewerUrl.search.slice(1), `file=${origin}/sample.pdf`);
+  assert.equal(viewerUrl.searchParams.get("file"), `${origin}/sample.pdf`);
   await page.waitForFunction(() => document.querySelector("#pageTotal")?.textContent === "3", null, {
     timeout: 30000,
   });
 
-  // 2. Turning the setting off removes the redirect rule again.
+  // 2. A download link saves the file instead of opening the viewer.
+  const downloads = await context.newPage();
+  await downloads.goto(`${origin}/download.html`);
+  const [attached] = await Promise.all([
+    downloads.waitForEvent("download", { timeout: 20000 }),
+    downloads.click("#attached"),
+  ]);
+  assert.equal(attached.suggestedFilename(), "Quarterly report.pdf");
+  assert.equal(new URL(downloads.url()).pathname, "/download.html", "the tab stayed on the page");
+
+  // The download attribute means the same thing, even for a .pdf URL.
+  const forced = await context.newPage();
+  await forced.goto(`${origin}/download.html`);
+  const [saved] = await Promise.all([
+    forced.waitForEvent("download", { timeout: 20000 }),
+    forced.click("#forced"),
+  ]);
+  assert.equal(saved.suggestedFilename(), "sample.pdf");
+  assert.equal(new URL(forced.url()).pathname, "/download.html", "the tab stayed on the page");
+
+  // 3. Turning the setting off leaves PDFs to the browser.
   const options = await context.newPage();
   await options.goto(`chrome-extension://${extensionId}/src/options.html`);
   await options.waitForSelector("#autoOpenPdf");
   await options.uncheck("#autoOpenPdf");
   await options.waitForFunction(() => document.querySelector("#status")?.textContent === "Saved.");
-  let remaining = -1;
-  for (let i = 0; i < 40; i++) {
-    remaining = await worker.evaluate(async () => (await chrome.declarativeNetRequest.getDynamicRules()).length);
-    if (remaining === 0) break;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  assert.equal(remaining, 0, "redirect rule is removed when the setting is off");
+  const untouched = await context.newPage();
+  await untouched.goto(`${origin}/sample.pdf`).catch(() => {});
+  await untouched.waitForTimeout(1500);
+  assert.equal(
+    untouched.url().startsWith("chrome-extension://"),
+    false,
+    "a PDF is not taken over when the setting is off",
+  );
+  await untouched.close();
 
-  // Re-enable it so the header sniff below is not the only mechanism in play.
   await options.check("#autoOpenPdf");
   await options.waitForFunction(() => document.querySelector("#status")?.textContent === "Saved.");
-  for (let i = 0; i < 40; i++) {
-    const count = await worker.evaluate(async () => (await chrome.declarativeNetRequest.getDynamicRules()).length);
-    if (count === 1) break;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
 
-  // 3. A PDF served from a URL without a .pdf suffix is caught by the header sniff.
+  // 4. A PDF served from a URL without a .pdf suffix is caught too.
   const extensionless = await context.newPage();
   await extensionless.goto(`${origin}/no-extension`);
   await extensionless.waitForURL(

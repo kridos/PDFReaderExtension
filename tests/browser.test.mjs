@@ -64,6 +64,15 @@ async function startServer(sample) {
       res.end(Buffer.from(sample));
       return;
     }
+    // Same bytes, but named by the server rather than by the URL.
+    if (url.pathname === "/download") {
+      res.writeHead(200, {
+        "content-type": "application/pdf",
+        "content-disposition": "attachment; filename*=UTF-8''Quarterly%20report.pdf",
+      });
+      res.end(Buffer.from(sample));
+      return;
+    }
     const filePath = path.join(ROOT, decodeURIComponent(url.pathname));
     if (!filePath.startsWith(ROOT)) {
       res.writeHead(403).end();
@@ -593,6 +602,32 @@ test("a chosen voice that cannot speak falls back to the default voice", async (
   const spoken = await page.evaluate(() => window.__spoken.join(" "));
   assert.match(spoken, /^Chapter one/, "reading continues with the default voice");
   assert.match(await page.textContent("#toast"), /default voice/i);
+});
+
+test("a saved copy keeps the name the server gave the file", async (t) => {
+  const sample = await makeSamplePdf();
+  const { server, origin } = await startServer(sample);
+  const browser = await chromium.launch();
+  t.after(async () => {
+    await browser.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const context = await browser.newContext({ acceptDownloads: true });
+  await context.addInitScript(FAKE_TTS);
+  const page = await context.newPage();
+
+  await page.goto(`${origin}/src/viewer.html?file=${origin}/download`);
+  await page.waitForFunction(() => document.querySelector("#pageTotal")?.textContent === "3", null, { timeout: 20000 });
+  assert.equal(await page.textContent("#docName"), "Quarterly report.pdf");
+
+  // Nothing was edited, so the download is a plain copy under its own name.
+  const [download] = await Promise.all([
+    page.waitForEvent("download", { timeout: 20000 }),
+    page.click("#btnSave"),
+  ]);
+  assert.equal(download.suggestedFilename(), "Quarterly report.pdf");
+  assert.match(await page.textContent("#toast"), /Saved a copy as Quarterly report\.pdf\./);
 });
 
 test("empty state and settings page load without errors", async (t) => {

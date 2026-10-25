@@ -298,15 +298,49 @@ async function openUrl(url) {
   if (type.includes("text/html")) {
     throw new Error("That link returned a web page, not a PDF. It may need you to sign in first.");
   }
-  let name = "document.pdf";
-  try {
-    const last = new URL(url).pathname.split("/").filter(Boolean).pop();
-    if (last) name = decodeURIComponent(last);
-  } catch {
-    /* keep the default name */
+  // The name the server suggests wins, so a saved copy is called what the site
+  // calls it rather than after the download URL.
+  let name = filenameFromDisposition(response.headers.get("content-disposition"));
+  if (!name) {
+    try {
+      const last = new URL(url).pathname.split("/").filter(Boolean).pop();
+      if (last) name = decodeURIComponent(last);
+    } catch {
+      /* keep the default name */
+    }
   }
+  name = name.replace(/[\\/]+/g, "-").trim() || "document.pdf";
   if (!/\.pdf$/i.test(name)) name += ".pdf";
   await openBytes(bytes, name, url);
+}
+
+/** True when the open document differs from the file it was loaded from. */
+function documentIsEdited() {
+  const originalPages = state.doc?.numPages ?? 0;
+  if (state.annotations.length) return true;
+  if (state.pageOrder.length !== originalPages) return true;
+  if (state.pageOrder.some((pageNumber, index) => pageNumber !== index + 1)) return true;
+  return Object.values(state.rotations).some((degrees) => degrees);
+}
+
+/** The `filename` (or RFC 5987 `filename*`) of a Content-Disposition header. */
+function filenameFromDisposition(value) {
+  if (!value) return "";
+  const extended = /filename\*\s*=\s*([^;]+)/i.exec(value);
+  if (extended) {
+    const raw = extended[1].trim().replace(/^["']|["']$/g, "");
+    // charset'lang'percent-encoded-name
+    const parts = raw.split("''");
+    const encoded = parts.length > 1 ? parts.slice(1).join("''") : raw;
+    try {
+      return decodeURIComponent(encoded);
+    } catch {
+      return encoded;
+    }
+  }
+  const plain = /filename\s*=\s*(?:"([^"]*)"|([^;]+))/i.exec(value);
+  if (!plain) return "";
+  return (plain[1] ?? plain[2] ?? "").trim();
 }
 
 async function openFile(file) {
@@ -1243,6 +1277,7 @@ function highlightWord(rawOffset) {
 async function savePdf() {
   if (!state.doc) return;
   ui.save.disabled = true;
+  const edited = documentIsEdited();
   try {
     const bytes = await buildEditedPdf(state.bytes, {
       annotations: state.annotations,
@@ -1252,13 +1287,14 @@ async function savePdf() {
     const blob = new Blob([bytes], { type: "application/pdf" });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.download = state.fileName.replace(/\.pdf$/i, "") + "-edited.pdf";
+    // An untouched document keeps its own name; only edits get a suffix.
+    link.download = `${state.fileName.replace(/\.pdf$/i, "")}${edited ? "-edited" : ""}.pdf`;
     document.body.append(link);
     link.click();
     link.remove();
     setTimeout(() => URL.revokeObjectURL(link.href), 30000);
     state.dirty = false;
-    toast("Saved a copy with your edits.");
+    toast(edited ? "Saved a copy with your edits." : `Saved a copy as ${link.download}.`);
   } catch (error) {
     toast(`Could not save: ${error.message}`, 5000);
   } finally {

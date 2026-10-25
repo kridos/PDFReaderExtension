@@ -4,59 +4,29 @@
 import { loadSettings } from "./lib/settings.js";
 
 const VIEWER = chrome.runtime.getURL("src/viewer.html");
-const RULE_ID = 1;
 const PAGE_READER_FILES = [
   "src/lib/range.core.js",
   "src/lib/reader.core.js",
   "src/content/page-reader.js",
 ];
 
-async function syncRedirectRule() {
-  const { autoOpenPdf } = await loadSettings();
-  const existing = await chrome.declarativeNetRequest.getDynamicRules();
-  const removeRuleIds = existing.map((rule) => rule.id);
-  const addRules = [];
-
-  if (autoOpenPdf) {
-    addRules.push({
-      id: RULE_ID,
-      priority: 1,
-      action: {
-        type: "redirect",
-        redirect: { regexSubstitution: `${VIEWER}?file=\\0` },
-      },
-      condition: {
-        // Anything that looks like a .pdf URL, with or without query/hash.
-        regexFilter: "(?i)^https?://[^?#]+\\.pdf(?:[?#].*)?$",
-        resourceTypes: ["main_frame"],
-      },
-    });
-  }
-
-  await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds, addRules });
-}
-
-syncRedirectRule().catch((err) => console.warn("Could not sync redirect rule", err));
-chrome.runtime.onInstalled.addListener(() => syncRedirectRule().catch(console.warn));
-chrome.runtime.onStartup.addListener(() => syncRedirectRule().catch(console.warn));
-
-chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "sync" && changes.autoOpenPdf) syncRedirectRule().catch(console.warn);
-});
-
 // Chrome has no blocking webRequest in MV3, but response headers are still
-// observable. This catches PDFs served from extension-less URLs, which the
-// declarative rule above cannot match.
+// observable. PDFs are picked up from those headers rather than from a URL
+// pattern, because only the response says whether the file is meant to be shown
+// or downloaded. A URL rewrite rule would hijack "Save link as" and download
+// buttons too, so there is none.
 const recent = new Map();
 
 chrome.webRequest.onHeadersReceived.addListener(
   (details) => {
     if (details.tabId < 0) return;
     if (details.url.startsWith(chrome.runtime.getURL(""))) return;
-    const header = (details.responseHeaders ?? []).find(
-      (h) => h.name.toLowerCase() === "content-type",
-    );
-    if (!header?.value || !header.value.toLowerCase().includes("application/pdf")) return;
+    const header = (name) =>
+      (details.responseHeaders ?? []).find((h) => h.name.toLowerCase() === name)?.value ?? "";
+    if (!header("content-type").toLowerCase().includes("application/pdf")) return;
+    // The server (or the site) asked the browser to save the file: honour that
+    // instead of opening the viewer.
+    if (/^\s*attachment\b/i.test(header("content-disposition"))) return;
 
     const key = `${details.tabId}:${details.url}`;
     const now = Date.now();

@@ -14,7 +14,7 @@ rearrange pages and save a new copy.
 - **No build step** — the extension loads unpacked as-is; pdf.js and pdf-lib are
   vendored in `src/vendor/`.
 
-Status: version 0.1.0, in development. All automated suites pass (27 unit / 7
+Status: version 0.1.0, in development. All automated suites pass (27 unit / 8
 viewer / 2 extension tests — see [Testing](#testing)).
 
 ## Contents
@@ -52,7 +52,9 @@ viewer / 2 extension tests — see [Testing](#testing)).
    - **On a web page:** click the extension icon to open the read-aloud panel;
      click the icon again to hide it.
    - **On a PDF:** click any `.pdf` link (it opens in the viewer), or use **Open**
-     in the viewer toolbar to pick a local file.
+     in the viewer toolbar to pick a local file. Links that download the file —
+     `Save link as`, download buttons, and anything the server marks as an
+     attachment — are left to Chrome, so the file is saved instead of opened.
    - **On pages Chrome will not allow scripts on** (for example the Web Store),
      a brief “!” badge appears instead of a panel.
    - **Anywhere else** (`chrome://` pages, the new tab page): the icon opens the
@@ -157,10 +159,13 @@ operations. The annotation colour is remembered between sessions.
 Page operations live in the thumbnail sidebar: rotate left/right, delete, and
 drag a thumbnail to reorder. The last remaining page cannot be deleted.
 
-**Save PDF** downloads a copy named `<name>-edited.pdf` with the page order,
-rotations and annotations baked in. Text boxes are written with the standard
-Helvetica font, so characters outside Latin-1 are saved as `?`; highlights, ink
-and page operations are unaffected.
+**Save PDF** downloads a copy with the page order, rotations and annotations
+baked in. An untouched document keeps its own name (`Quarterly report.pdf`); one
+that has been changed is saved as `<name>-edited.pdf` so the original is not
+overwritten. The name comes from the server's `Content-Disposition`, falling back
+to the URL, so a PDF behind `…/download?id=7` is not saved as `download.pdf`.
+Text boxes are written with the standard Helvetica font, so characters outside
+Latin-1 are saved as `?`; highlights, ink and page operations are unaffected.
 
 Annotations live in the tab until you save, so Chrome warns before closing a tab
 with unsaved edits.
@@ -273,7 +278,7 @@ Minimal containers may need extra shared libraries and a fontconfig file; see
 
 ```bash
 npm test                # 27 tests: pure logic + real PDF bytes (Node only)
-npm run test:browser    # 7 tests: the viewer page and the settings page
+npm run test:browser    # 8 tests: the viewer page and the settings page
 npm run test:extension  # 2 tests: the loaded extension, PDFs and web pages
 ```
 
@@ -300,13 +305,19 @@ npm run test:extension  # 2 tests: the loaded extension, PDFs and web pages
   status line and toast must explain why and the player must go back to idle), an
   engine that accepts an utterance and never reports anything (reported as `did
   not start` rather than hanging), and a chosen voice that cannot speak (the
-  sentence is retried on the default voice and reading continues). A final test
-  covers the empty state and the settings page.
+  sentence is retried on the default voice and reading continues). Another opens
+  a PDF whose filename only exists in its `Content-Disposition` header and saves
+  it untouched, checking the download keeps that name. A final test covers the
+  empty state and the settings page.
 - **`npm run test:extension`** (`tests/extension.test.mjs`) loads the unpacked
-  extension in full Chromium and checks the redirect rule and settings toggle,
-  opens a `.pdf` URL and an extension-less PDF URL into the viewer, then injects
-  the page reader into a test article: hidden/script/nav/button text is excluded,
-  reading runs between word anchors, the in-page highlight appears, toggling the
+  extension in full Chromium and checks that PDFs are taken over from their
+  response headers, that a `Content-Disposition: attachment` link downloads under
+  the server's filename without the tab leaving the page, that a `download`
+  attribute link on a `.pdf` URL downloads too, and that the settings toggle stops
+  the takeover. It opens a `.pdf` URL and an extension-less PDF URL into the
+  viewer, then injects the page reader into a test article: hidden/script/nav/button
+  text is excluded, reading runs between word anchors, the in-page highlight
+  appears, toggling the
   panel works, re-injection does not duplicate it, and the panel still builds on a
   page that enforces `require-trusted-types-for 'script'`.
 
@@ -318,7 +329,9 @@ they do not exercise real OS voices.
 Automated tests cannot click the toolbar icon or hear audio, so check these once
 after loading unpacked:
 
-1. Click a `.pdf` link: the viewer opens and renders the first page.
+1. Click a `.pdf` link: the viewer opens and renders the first page. Click a
+   download link for a PDF (or right-click → **Save link as**): the file is
+   saved, and the tab stays where it was.
 2. Enter a start page, end page, start word and end word: the status line shows
    the anchor pages (and a word count when an end word is set), and **Read range**
    starts speaking quickly, highlights the current word and turns pages. On a long
@@ -327,7 +340,8 @@ after loading unpacked:
 3. Select a word in the PDF and press **Use selection**: the matching field fills
    and the page bound moves.
 4. Draw with Pen, add a Text box, highlight a selection, undo once, then
-   **Save PDF** and open the downloaded file: edits are present.
+   **Save PDF** and open the downloaded file: edits are present and the name ends
+   in `-edited.pdf`. Saving an untouched document keeps its original name.
 5. Rotate and delete a page in the thumbnail rail, save, and confirm the result.
 6. On a news article, click the extension icon: the panel reports a word count.
    Set anchors, press **Read**, and confirm the page highlights and scrolls.
