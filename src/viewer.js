@@ -714,7 +714,11 @@ function buildTextLayer(view, vp, textData) {
     span.className = "ti";
     span.style.fontSize = `${fontSize}px`;
     span.style.left = `${matrix[4]}px`;
-    span.style.top = `${vp.height - matrix[5] - fontSize * ASCENT}px`;
+    // `matrix[5]` is the baseline already measured down from the top of the
+    // page: the viewport transform flips the PDF's y axis. Subtracting it from
+    // the page height again mirrored every line, which put the invisible text
+    // (and the reading highlight) on the wrong part of the page.
+    span.style.top = `${matrix[5] - fontSize * ASCENT}px`;
 
     let scaleX = 1;
     const desired = item.width * vp.scale;
@@ -1506,7 +1510,7 @@ async function updateRangePreview() {
   const span = inputs.endPage - inputs.startPage + 1;
   if (span > 60 && !inputs.endsWithPage) {
     const end = inputs.openEnded ? " (to the end of the document)" : "";
-    setRangeStatus(`Pages ${inputs.startPage}–${inputs.endPage}${end}. Press “Read range” to start reading them.`);
+    setRangeStatus(`Pages ${inputs.startPage}–${inputs.endPage}${end}. Press “Start reading” to begin.`);
     ui.readRange.disabled = !Reader.supported;
     return;
   }

@@ -81,6 +81,19 @@
         <aside id="readerPanel" class="panel reader-panel">
           <div class="panel-head"><span>Read aloud</span></div>
 
+          <div class="reader-controls">
+            <div class="row">
+              <button id="btnReadRange" class="btn primary grow" disabled title="Start reading the range below">Start reading</button>
+              <button id="btnStop" class="btn" disabled>Stop</button>
+              <button id="btnPlayPause" class="btn icon big" title="Play / pause (space)" disabled>▶</button>
+            </div>
+            <label class="speed">
+              <span>Speed <output id="rateLabel">1.0×</output></span>
+              <input id="rate" type="range" min="0.5" max="8" step="0.1" value="1" />
+            </label>
+            <p id="rangeStatus" class="range-status">Open a PDF to set a reading range.</p>
+          </div>
+
           <div class="reader-form">
             <label>
               Read
@@ -117,19 +130,6 @@
               keep reading to the end of the document, and <em>From page</em> empty to start at the
               beginning. Dimmed fields are not used by the selected option.
             </p>
-            <p id="rangeStatus" class="range-status">Open a PDF to set a reading range.</p>
-            <div class="row">
-              <button id="btnReadRange" class="btn primary" disabled>Read range</button>
-              <button id="btnStop" class="btn" disabled>Stop</button>
-            </div>
-          </div>
-
-          <div class="player">
-            <button id="btnPlayPause" class="btn icon big" title="Play / pause (space)" disabled>▶</button>
-            <label class="speed">
-              Speed <output id="rateLabel">1.0×</output>
-              <input id="rate" type="range" min="0.5" max="8" step="0.1" value="1" />
-            </label>
           </div>
 
           <label class="voice-row">Voice<select id="voiceSelect"></select></label>

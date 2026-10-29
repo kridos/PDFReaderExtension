@@ -210,6 +210,55 @@ test("viewer renders, reads a word-anchored range, annotates and saves", async (
   const wordCount = await page.evaluate(() => document.querySelectorAll("#textLayer .w").length);
   assert.ok(wordCount > 5, `text layer has ${wordCount} words`);
 
+  // The invisible text layer has to sit on top of the glyphs actually painted.
+  // A flipped y offset mirrored every line, which put text selection and the
+  // follow-along highlight on blank paper.
+  const alignment = await page.evaluate(() => {
+    const canvas = document.querySelector("#pdfCanvas");
+    const rootRect = document.querySelector("#pageWrap").getBoundingClientRect();
+    const scale = canvas.width / rootRect.width;
+    const pixels = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data;
+    const ink = (x0, y0, x1, y1) => {
+      let n = 0;
+      const X0 = Math.max(0, Math.floor(x0));
+      const X1 = Math.min(canvas.width, Math.ceil(x1));
+      const Y0 = Math.max(0, Math.floor(y0));
+      const Y1 = Math.min(canvas.height, Math.ceil(y1));
+      for (let y = Y0; y < Y1; y++) {
+        for (let x = X0; x < X1; x++) {
+          const i = (y * canvas.width + x) * 4;
+          if (pixels[i] < 160 && pixels[i + 1] < 160 && pixels[i + 2] < 160) n++;
+        }
+      }
+      return n;
+    };
+    const spans = [...document.querySelectorAll("#textLayer .ti")];
+    const blank = [];
+    for (const span of spans) {
+      const r = span.getBoundingClientRect();
+      if (r.width < 2 || r.height < 2) continue;
+      const inside = ink(
+        (r.left - rootRect.left) * scale,
+        (r.top - rootRect.top) * scale,
+        (r.right - rootRect.left) * scale,
+        (r.bottom - rootRect.top) * scale,
+      );
+      if (inside < 4) blank.push(span.textContent.slice(0, 24));
+    }
+    const heading = spans.find((span) => /Chapter one/.test(span.textContent));
+    const headingTop = heading
+      ? heading.getBoundingClientRect().top - rootRect.top
+      : null;
+    return { total: spans.length, blank, headingTop, pageHeight: rootRect.height };
+  });
+  assert.ok(alignment.total >= 3, `text layer has ${alignment.total} runs`);
+  assert.equal(alignment.blank.length, 0, `text boxes over blank paper: ${JSON.stringify(alignment.blank)}`);
+
+  assert.ok(
+    alignment.headingTop !== null && alignment.headingTop < alignment.pageHeight * 0.25,
+    `the heading sits ${Math.round(alignment.headingTop)}px down a ${Math.round(alignment.pageHeight)}px page`,
+  );
+
   // Zoom shortcuts change the label, and Ctrl+0 returns to fit-to-width.
   const zoomBefore = await page.textContent("#btnZoomLabel");
   await page.keyboard.press("Control+=");
@@ -793,6 +842,47 @@ test("a voice that never fires a start event is read, not repeated", async (t) =
   // A missing start event is not a failure: nothing may be spoken twice.
   const first = spoken.indexOf("Chapter one");
   assert.equal(spoken.indexOf("Chapter one", first + 1), -1, `chunk was re-spoken: ${spoken}`);
+});
+
+test("the start button is visible and clickable in a short window", async (t) => {
+  const sample = await makeSamplePdf();
+  const { server, origin } = await startServer(sample);
+  const browser = await chromium.launch();
+  t.after(async () => {
+    await browser.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const context = await browser.newContext();
+  await context.addInitScript(FAKE_TTS, 2);
+  const page = await context.newPage();
+  // A laptop-sized window is short enough that the range form has to scroll.
+  await page.setViewportSize({ width: 1180, height: 620 });
+  await page.goto(`${origin}/src/viewer.html?file=${origin}/sample.pdf`);
+  await page.waitForFunction(() => document.querySelector("#pageTotal")?.textContent === "3", null, {
+    timeout: 20000,
+  });
+
+  const button = await page.evaluate(() => {
+    const btn = document.querySelector("#btnReadRange");
+    const rect = btn.getBoundingClientRect();
+    const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return {
+      disabled: btn.disabled,
+      inWindow: rect.top >= 0 && rect.bottom <= window.innerHeight && rect.width > 0,
+      covered: !(hit === btn || btn.contains(hit)),
+      hit: hit ? `${hit.tagName}.${hit.className}` : "nothing",
+    };
+  });
+  assert.equal(button.disabled, false, "the start button never becomes usable");
+  assert.ok(button.inWindow, "the start button is outside the visible window");
+  assert.ok(!button.covered, `the start button is covered by ${button.hit}`);
+
+  // Clicking it (which fails outright when it is covered) starts a reading.
+  await page.click("#btnReadRange");
+  await page.waitForFunction(() => Boolean(document.querySelector("#textLayer .w.reading")), null, {
+    timeout: 15000,
+  });
 });
 
 test("the reading list has room of its own and scrolls with the voice", async (t) => {

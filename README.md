@@ -106,11 +106,11 @@ Matching is case-insensitive and ignores line breaks, so `the river was cold`
 still matches when the PDF wraps it. The status line under the fields reports
 which page each anchor matched, and with an end word it also reports the word
 count and an estimated duration — a surprising match is visible before you press
-**Read range**. Missing anchors produce an explicit message instead of a silently
+**Start reading**. Missing anchors produce an explicit message instead of a silently
 different range.
 
 **Pages are read in as they are needed.** Nothing is parsed beyond the page you
-are looking at until you press **Read range**: the viewer then reads the start
+are looking at until you press **Start reading**: the viewer then reads the start
 page, begins speaking, and parses the next page while the voice is still working
 through the current one, keeping a few sentences queued ahead. A 400-page range
 therefore starts talking almost immediately instead of after every page has been
@@ -422,7 +422,7 @@ after loading unpacked:
    saved, and the tab stays where it was.
 2. Pick **Word/phrase → word/phrase** in the **Read** list, enter a start page,
    end page, start word and end word: the status line shows the anchor pages (and
-   a word count when an end word is set), and **Read range** starts speaking
+   a word count when an end word is set), and **Start reading** starts speaking
    quickly, highlights the current word and turns pages. On a long PDF the status
    line should read `Reading · N of M pages loaded` with a small N rather than
    loading the whole range first. **Stop** ends it.

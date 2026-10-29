@@ -193,6 +193,42 @@ main.reader-hidden #readerPanel {
   overscroll-behavior: contain;
 }
 
+/* The start button keeps its place while the panel scrolls: it was previously
+   the last thing inside a scrolling form, so a short window hid it entirely. */
+.reader-panel > .panel-head,
+.reader-controls {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--panel);
+}
+
+.reader-controls {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.reader-controls .btn.grow {
+  flex: 1;
+}
+
+.reader-controls .speed {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.reader-controls input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
 .panel-head {
   display: flex;
   justify-content: space-between;
@@ -497,7 +533,7 @@ main.reader-hidden #readerPanel {
   gap: 10px;
   /* Squeezes (and scrolls) before the reading list at the bottom does. */
   flex: 0 1 auto;
-  min-height: 160px;
+  min-height: 0;
   overflow-y: auto;
   border-bottom: 1px solid var(--line);
 }
@@ -588,29 +624,6 @@ main.reader-hidden #readerPanel {
 .row {
   display: flex;
   gap: 8px;
-}
-
-.player {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px;
-  border-bottom: 1px solid var(--line);
-}
-
-.player .speed {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 11.5px;
-  color: var(--muted);
-}
-
-.player input[type="range"] {
-  width: 100%;
-  accent-color: var(--accent);
 }
 
 .voice-row {
