@@ -559,7 +559,7 @@ main.reader-hidden #readerPanel {
 .reader-form input[type="number"],
 .reader-form input[type="text"],
 .reader-form select,
-.voice-row select {
+.reader-controls select {
   background: #0f1219;
   color: var(--text);
   border: 1px solid var(--line);
@@ -572,7 +572,7 @@ main.reader-hidden #readerPanel {
 .reader-form input[type="text"]:focus,
 .reader-form input[type="number"]:focus,
 .reader-form select:focus,
-.voice-row select:focus {
+.reader-controls select:focus {
   outline: none;
   border-color: var(--accent);
 }
@@ -626,28 +626,26 @@ main.reader-hidden #readerPanel {
   gap: 8px;
 }
 
-.voice-row {
-  flex: 0 0 auto;
-  display: flex;
+/* The voice picker and its test sit in the fixed bar with the buttons. Below the
+   scrolling form they were pushed past the bottom of a short window, where the
+   test could not be found at all. */
+.reader-controls .row.voice {
   align-items: flex-end;
-  gap: 8px;
-  padding: 12px;
-  font-size: 12px;
-  color: var(--muted);
-  border-bottom: 1px solid var(--line);
 }
 
-.voice-row label {
+.voice-label {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 4px;
+  font-size: 11.5px;
+  color: var(--muted);
 }
 
-.voice-row .btn {
+.reader-controls .row.voice .btn {
   flex: 0 0 auto;
-  height: 30px;
+  height: 32px;
 }
 
 .transcript-head {

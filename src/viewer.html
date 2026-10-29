@@ -91,6 +91,13 @@
               <span>Speed <output id="rateLabel">1.0×</output></span>
               <input id="rate" type="range" min="0.5" max="8" step="0.1" value="1" />
             </label>
+            <!-- The voice and its test live in this fixed bar too: further down
+                 they were pushed off a short window, where the test could not be
+                 found at all. -->
+            <div class="row voice">
+              <label class="voice-label">Voice<select id="voiceSelect"></select></label>
+              <button id="btnTestVoice" class="btn" type="button" title="Speak a short sample with the selected voice">Test voice</button>
+            </div>
             <p id="rangeStatus" class="range-status">Open a PDF to set a reading range.</p>
           </div>
 
@@ -130,11 +137,6 @@
               keep reading to the end of the document, and <em>From page</em> empty to start at the
               beginning. Dimmed fields are not used by the selected option.
             </p>
-          </div>
-
-          <div class="voice-row">
-            <label>Voice<select id="voiceSelect"></select></label>
-            <button id="btnTestVoice" class="btn tiny" type="button" title="Speak a short sample with the selected voice">Test</button>
           </div>
 
           <div class="transcript-head">

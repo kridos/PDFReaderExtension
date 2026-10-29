@@ -114,9 +114,11 @@ const reader = new Reader({
   onError: ({ reason }) => reportSpeechFailure(reason),
   onVoiceFallback: ({ stage } = {}) =>
     toast(
-      stage === 2
-        ? "That voice could not speak here, so the browser's default voice is being used instead."
-        : "That voice could not speak here, so a voice installed on this computer is being used instead.",
+      stage === 3
+        ? "The browser's speech engine stayed silent, so the system's own speech service is being used instead."
+        : stage === 2
+          ? "That voice could not speak here, so the browser's default voice is being used instead."
+          : "That voice could not speak here, so a voice installed on this computer is being used instead.",
       6000,
     ),
   onSilentStart: (info) => noteSilentEngine(info),
@@ -138,15 +140,18 @@ function noteSilentEngine({ voices = 0, localVoices = 0 } = {}) {
     `The voice has not started after several seconds${voices ? ` (${voices} voices found, ${localVoices} installed here)` : ""}. ` +
       "Check the tab is not muted, then that the system's text-to-speech service is running" +
       (linux ? " — on Linux that is speech-dispatcher; test it in a terminal with “spd-say hello”." : ".") +
-      " Use “Test” beside the voice list to check one voice on its own.",
+      " Use “Test voice” in the panel above to check one voice on its own.",
     10000,
   );
 }
 
+const VOICE_SAMPLE = "This is how PDF Reader will read your document aloud.";
+
 /**
- * Speak one short sentence with the selected voice. The engine is asked for its
- * own verdict, so a voice can be checked without opening Settings or starting a
- * whole range — and without the page text being involved at all.
+ * Speak one short sentence with the selected voice — first through the page's
+ * speech engine, then, if that stays silent, through the system's own speech
+ * service. A voice can be checked without opening Settings or starting a whole
+ * range, and without the page text being involved at all.
  */
 function testVoice() {
   if (!Reader.supported) {
@@ -158,7 +163,7 @@ function testVoice() {
     return;
   }
   const synth = window.speechSynthesis;
-  const utter = new SpeechSynthesisUtterance("This is how PDF Reader will read your document aloud.");
+  const utter = new SpeechSynthesisUtterance(VOICE_SAMPLE);
   utter.rate = Number(state.settings.rate) || 1;
   utter.pitch = Number(state.settings.pitch) || 1;
   const selected = state.settings.voiceURI || "";
@@ -199,10 +204,6 @@ function testVoice() {
     if (started) return;
     const voices = synth.getVoices();
     const local = voices.filter((v) => v.localService).length;
-    setRangeStatus(
-      `The engine accepted the sample but nothing started (${voices.length} voices found, ${local} installed here).`,
-      "error",
-    );
     console.warn("[PDF Reader] voice test produced no start", {
       voice: label,
       voices: voices.length,
@@ -211,6 +212,58 @@ function testVoice() {
       pending: synth.pending,
       paused: synth.paused,
     });
+    const tts = Reader.systemTts;
+    if (!tts) {
+      setRangeStatus(
+        `The engine accepted the sample but nothing started (${voices.length} voices found, ${local} installed here).`,
+        "error",
+      );
+      return;
+    }
+    // The page API is not the only way in: the system's own service is asked to
+    // speak the same sentence, so the panel can say which one works here.
+    setRangeStatus("The browser engine stayed silent — trying the system speech service…");
+    let systemStarted = false;
+    const giveUp = setTimeout(() => {
+      if (systemStarted) return;
+      setRangeStatus(
+        "Neither speech engine started. The system's text-to-speech service is not producing sound on this machine.",
+        "error",
+      );
+    }, 5000);
+    try {
+      tts.stop();
+      tts.speak(
+        VOICE_SAMPLE,
+        {
+          enqueue: false,
+          rate: utter.rate,
+          pitch: utter.pitch,
+          onEvent: (event) => {
+            if (event?.type === "start") {
+              systemStarted = true;
+              clearTimeout(giveUp);
+              setRangeStatus("The system speech service is speaking — this is the engine that works here.", "ok");
+            } else if (event?.type === "end") {
+              clearTimeout(giveUp);
+              setRangeStatus("Voice test finished through the system speech service — this is the engine that works here.", "ok");
+            } else if (event?.type === "error") {
+              clearTimeout(giveUp);
+              setRangeStatus(`The system speech service failed too (${event.errorMessage || "no reason given"}).`, "error");
+            }
+          },
+        },
+        () => {
+          const error = chrome.runtime?.lastError;
+          if (!error || systemStarted) return;
+          clearTimeout(giveUp);
+          setRangeStatus(`The system speech service refused: ${error.message}`, "error");
+        },
+      );
+    } catch (error) {
+      clearTimeout(giveUp);
+      setRangeStatus(`Could not test the system speech service: ${error.message}`, "error");
+    }
   }, 6000);
 }
 
@@ -226,7 +279,9 @@ function reportSpeechFailure(reason) {
   if (!voices) {
     message = "This browser has no voices installed, so nothing can be read aloud. Install a text-to-speech voice in your system settings.";
   } else if (reason === "did-not-start") {
-    message = `The speech engine never started (${voices} voice${voices === 1 ? "" : "s"} found), not even with a voice installed on this machine. Reload the tab, then press play again.`;
+    message = `The speech engine never started (${voices} voice${voices === 1 ? "" : "s"} found), not even with a voice installed on this machine or the system speech service. Reload the tab, then press play again.`;
+  } else if (reason.startsWith("system-")) {
+    message = `The system speech service could not speak (${reason.slice(7)}). Check that a text-to-speech service is installed and running, then try again.`;
   } else if (reason === "stalled") {
     message = "The speech engine stopped reporting progress mid-sentence. Press play again, or pick a different voice in Settings.";
   } else if (reason === "not-allowed") {

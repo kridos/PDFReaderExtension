@@ -256,3 +256,83 @@ test("a voice that never starts hands over to one installed locally", async (t) 
   assert.ok(used.includes("net-1"), "the chosen voice is tried first");
   assert.equal(used[used.length - 1], "local-1", "the installed voice finishes the chunk");
 });
+
+/** The system speech service (chrome.tts) as the extension sees it. */
+function makeSystemTts(speak) {
+  return {
+    said: [],
+    stop() {},
+    pause() {},
+    resume() {},
+    speak(text, options, callback) {
+      this.said.push({ text, options });
+      speak(text, options, callback ?? (() => {}));
+    },
+  };
+}
+
+test("a page engine that will not start hands the chunk to the system speech service", async (t) => {
+  installClock();
+  t.after(() => {
+    restoreClock();
+    delete globalThis.chrome;
+  });
+  const errors = [];
+  const fallbacks = [];
+  const engine = makeEngine([LOCAL], () => {});
+  const tts = makeSystemTts((text, options) => {
+    globalThis.setTimeout(() => {
+      options.onEvent({ type: "start" });
+      options.onEvent({ type: "word", charIndex: 0 });
+      options.onEvent({ type: "end" });
+    }, 50);
+  });
+  globalThis.chrome = { tts, runtime: {} };
+  const Reader = await loadReader(engine);
+  const reader = new Reader({
+    onError: ({ reason }) => errors.push(reason),
+    onVoiceFallback: ({ stage }) => fallbacks.push(stage),
+  });
+  reader.load({
+    chunks: [
+      { start: 0, end: 3, text: "one" },
+      { start: 4, end: 7, text: "two" },
+    ],
+  });
+  reader.play();
+  advance(60000);
+
+  assert.deepEqual(errors, []);
+  // First the browser default voice is tried, then the system service; neither
+  // handover is repeated for the next chunk.
+  assert.deepEqual(fallbacks, [2, 3], "the handovers are reported once each");
+  assert.deepEqual(
+    tts.said.map((entry) => entry.text),
+    ["one", "two"],
+    "every chunk is spoken by the service that works",
+  );
+  assert.equal(tts.said[0].options.enqueue, false, "a chunk is not queued behind the silent engine");
+  assert.equal(reader.state, "ended");
+});
+
+test("a system speech service that refuses is reported with its reason", async (t) => {
+  installClock();
+  t.after(() => {
+    restoreClock();
+    delete globalThis.chrome;
+  });
+  const errors = [];
+  const engine = makeEngine([LOCAL], () => {});
+  const tts = makeSystemTts((text, options) => {
+    globalThis.setTimeout(() => options.onEvent({ type: "error", errorMessage: "platform error" }), 10);
+  });
+  globalThis.chrome = { tts, runtime: {} };
+  const Reader = await loadReader(engine);
+  const reader = new Reader({ onError: ({ reason }) => errors.push(reason) });
+  reader.load({ chunks: [{ start: 0, end: 3, text: "one" }] });
+  reader.play();
+  advance(60000);
+
+  assert.deepEqual(errors, ["system-platform error"]);
+  assert.equal(reader.state, "idle");
+});

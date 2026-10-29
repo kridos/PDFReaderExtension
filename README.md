@@ -144,11 +144,12 @@ The **Reading** list scrolls on its own and can be made taller by dragging its
 bottom-right corner. While a range is read it follows the voice, keeping the
 sentence being spoken in the middle and leaving the range fields where they are.
 
-**Test** beside the voice list speaks one short sample sentence with the voice
-chosen there, without starting a range and without the page text being involved.
-It separates “this voice cannot speak here” from “the range is wrong”: the status
-line reports that the sample started, the error the engine gave, or that nothing
-started at all within six seconds. Stop a reading before testing.
+**Test voice** in the fixed bar at the top of the panel speaks one short sample
+sentence with the voice chosen there, without starting a range and without the
+page text being involved. It separates “this voice cannot speak here” from “the
+range is wrong”: the status line reports that the sample started, the error the
+engine gave, and — if the page engine stays silent — whether the system speech
+service managed it instead. Stop a reading before testing.
 
 **When the voice cannot speak.** Chrome sometimes refuses a sentence outright —
 a voice that is no longer installed, a network voice while offline, or an engine
@@ -174,6 +175,13 @@ With no voice chosen, an installed voice is tried **first** for the same reason:
 the browser default is often a network voice, and waiting for it to fail delayed
 the first sound by several seconds.
 
+If every one of those stays silent, the chunk is handed to the system's own
+speech service (`chrome.tts`). That is a different entry point into the same
+hardware, and on a machine where the page engine accepts voices and never speaks
+it is the last engine worth trying. The reading continues there from the same
+sentence, a toast says the engine changed, and only a refusal from both engines
+is reported as a failure. This is what the `tts` permission is for.
+
 A different failure looks like a full reading list and no audio at all: the
 engine accepts the sentence, reports that it is speaking, and then produces no
 start, no word, no end and no error. Nothing in the platform can say whether
@@ -182,7 +190,7 @@ begin — it says what it knows instead. After seven seconds the status line sho
 `No audio yet (N voices found, M installed here)` and a toast suggests checking
 that the tab is not muted and that the system's text-to-speech service is running
 (on Linux, that is speech-dispatcher — `spd-say hello` in a terminal tests it),
-and points at **Test** in the panel.
+and points at **Test voice** in the panel.
 Only when every one of those stays silent is it reported as `The speech engine
 never started …` instead of leaving the player looking busy. That message
 includes how many voices the browser lists, and the console gets a
@@ -302,6 +310,8 @@ Settings are stored with `chrome.storage.sync`.
 - **`declarativeNetRequest` / `webRequest`** — route `.pdf` links and PDF
   responses into the viewer.
 - **`storage`** — remember voice, speed and the PDF takeover setting.
+- **`tts`** — speak through the system's own speech service when Chrome's page
+  engine stays silent.
 
 PDFs are parsed and edited locally with pdf.js and pdf-lib; speech uses Chrome's
 built-in synthesis. No document or page text is sent anywhere, and there are no

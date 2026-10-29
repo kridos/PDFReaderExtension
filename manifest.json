@@ -26,7 +26,8 @@
   "permissions": [
     "storage",
     "scripting",
-    "webRequest"
+    "webRequest",
+    "tts"
   ],
   "host_permissions": [
     "http://*/*",

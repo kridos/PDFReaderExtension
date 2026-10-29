@@ -33,6 +33,16 @@ class Reader {
   }
 
   /**
+   * The system's own speech service, which an extension page reaches through
+   * chrome.tts. It is a separate entry point from the page's speechSynthesis:
+   * where that API accepts voices and then never speaks, this is the last
+   * engine worth trying. Content scripts do not get this API.
+   */
+  static get systemTts() {
+    return typeof chrome !== "undefined" && chrome.tts ? chrome.tts : null;
+  }
+
+  /**
    * @param {{onState?: (state: string) => void, onProgress?: (p: {absolute: number, chunkIndex: number, chunk: {start: number, end: number, text: string}}) => void, onStarved?: () => void, onError?: (info: {reason: string, chunkIndex: number}) => void, onVoiceFallback?: (info: {reason: string}) => void}} handlers
    */
   constructor({ onState, onProgress, onStarved, onError, onVoiceFallback, onSilentStart } = {}) {
@@ -51,6 +61,10 @@ class Reader {
     // all, which is what a dead system speech service looks like.
     this.onSilentStart = onSilentStart ?? (() => {});
     this._silentNotified = false;
+    // Which engine is speaking: the page's speechSynthesis ("web"), or the
+    // system service through chrome.tts ("system") once the first stayed silent.
+    this._engine = "web";
+    this._systemTried = false;
     // Which voice the queue is reduced to: 0 the chosen (or default) voice,
     // 1 a voice installed on this machine, 2 the browser default.
     this._voiceStage = 0;
@@ -114,6 +128,8 @@ class Reader {
     this._voiceStage = 0;
     this._failedVoiceURI = "";
     this._silentNotified = false;
+    this._engine = "web";
+    this._systemTried = false;
     this._setState("idle");
   }
 
@@ -146,7 +162,15 @@ class Reader {
 
   pause() {
     if (!Reader.supported || this.state !== "playing") return;
-    window.speechSynthesis.pause();
+    if (this._engine === "system") {
+      try {
+        Reader.systemTts.pause();
+      } catch {
+        // A service that is not running has nothing to pause.
+      }
+    } else {
+      window.speechSynthesis.pause();
+    }
     this._setState("paused");
   }
 
@@ -157,6 +181,14 @@ class Reader {
     if (this._starved || this.index >= this.chunks.length) {
       this._starved = false;
       this._speakCurrent();
+      return;
+    }
+    if (this._engine === "system") {
+      try {
+        Reader.systemTts.resume();
+      } catch {
+        // Nothing to resume on a service that is not running.
+      }
       return;
     }
     window.speechSynthesis.resume();
@@ -177,6 +209,13 @@ class Reader {
       this._cancelledAt = Date.now();
       window.speechSynthesis.cancel();
     }
+    if (Reader.systemTts) {
+      try {
+        Reader.systemTts.stop();
+      } catch {
+        // Nothing was playing through the system service.
+      }
+    }
     if (this.state !== "idle") this._setState("idle");
   }
 
@@ -188,6 +227,13 @@ class Reader {
       this._token++;
       this._cancelledAt = Date.now();
       window.speechSynthesis.cancel();
+      if (Reader.systemTts) {
+        try {
+          Reader.systemTts.stop();
+        } catch {
+          // Nothing was playing through the system service.
+        }
+      }
       this._setState("playing");
       this._speakCurrent();
     } else {
@@ -267,7 +313,9 @@ class Reader {
       this._setState("ended");
       return;
     }
-    this._startUtterance(this.chunks[this.index], token, 0);
+    const chunk = this.chunks[this.index];
+    if (this._engine === "system") this._speakSystem(chunk, token);
+    else this._startUtterance(chunk, token, 0);
   }
 
   /**
@@ -446,6 +494,116 @@ class Reader {
     else speak();
   }
 
+  /**
+   * Speak one chunk through the system's own speech service (chrome.tts). Its
+   * events are shaped differently from the page API's — start, word, end and
+   * error, each with a message rather than an error code — and it plays the
+   * system default voice, which is the point: it is a different way in.
+   */
+  _speakSystem(chunk, token) {
+    const tts = Reader.systemTts;
+    if (!tts) {
+      this._setState("idle");
+      this.onError({ reason: "system-unavailable", chunkIndex: this.index });
+      return;
+    }
+    const stale = () => token !== this._token;
+    let started = false;
+    let failed = false;
+    let watchdog = 0;
+    let stall = 0;
+    const clear = () => {
+      clearTimeout(watchdog);
+      clearTimeout(stall);
+    };
+    const armStall = () => {
+      clearTimeout(stall);
+      stall = setTimeout(() => {
+        if (stale() || failed) return;
+        failed = true;
+        try {
+          tts.stop();
+        } catch {
+          // Already stopped.
+        }
+        this._failUtterance(chunk, token, 3, "stalled", ATTEMPTS);
+      }, STALL_TIMEOUT);
+    };
+    const begin = () => {
+      if (started) return;
+      started = true;
+      clearTimeout(watchdog);
+      armStall();
+      this.onProgress({ absolute: chunk.start, chunkIndex: this.index, chunk });
+    };
+    watchdog = setTimeout(() => {
+      if (stale() || started || failed) return;
+      failed = true;
+      try {
+        tts.stop();
+      } catch {
+        // Nothing was playing.
+      }
+      this._failUtterance(chunk, token, 3, "did-not-start", ATTEMPTS);
+    }, START_GRACE);
+
+    const onEvent = (event) => {
+      if (stale() || failed) return;
+      const type = event?.type;
+      if (type === "start") {
+        begin();
+      } else if (type === "word") {
+        begin();
+        armStall();
+        const offset = typeof event.charIndex === "number" ? event.charIndex : 0;
+        this.onProgress({ absolute: chunk.start + offset, chunkIndex: this.index, chunk });
+      } else if (type === "end") {
+        clear();
+        this.index++;
+        this._speakCurrent();
+      } else if (type === "error") {
+        clear();
+        failed = true;
+        this._failUtterance(
+          chunk,
+          token,
+          3,
+          `system-${event.errorMessage || "speech-error"}`,
+          ATTEMPTS,
+        );
+      }
+      // interrupted, cancelled, pause and resume need no handling here.
+    };
+
+    this._setState("playing");
+    try {
+      tts.stop();
+      tts.speak(
+        chunk.text,
+        {
+          enqueue: false,
+          rate: Math.min(10, Math.max(0.1, this.rate)),
+          pitch: Math.min(2, Math.max(0, this.pitch)),
+          volume: Math.min(1, Math.max(0, this.volume)),
+          onEvent,
+        },
+        () => {
+          // Chrome only reports a refused request here, and reading the error
+          // inside the callback is what keeps it from being logged as unchecked.
+          const error = typeof chrome !== "undefined" ? chrome.runtime?.lastError : null;
+          if (!error || failed || started) return;
+          failed = true;
+          clear();
+          this._failUtterance(chunk, token, 3, `system-${error.message || "speak-failed"}`, ATTEMPTS);
+        },
+      );
+    } catch (error) {
+      clear();
+      failed = true;
+      this._failUtterance(chunk, token, 3, `system-${error?.message || "speak-failed"}`, ATTEMPTS);
+    }
+  }
+
   /** Give up on this utterance, trying another voice first if there is one. */
   _failUtterance(chunk, token, stage, reason, attempt = 0) {
     if (token !== this._token) return;
@@ -475,6 +633,16 @@ class Reader {
       }
       this.onVoiceFallback({ reason, stage: next });
       this._startUtterance(chunk, token, next, 0);
+      return;
+    }
+    // The page's own engine has now refused this chunk three times and on more
+    // than one voice. The system service is a different way in, so it gets the
+    // chunk before the reader gives up on it.
+    if (this._engine === "web" && !this._systemTried && Reader.systemTts) {
+      this._systemTried = true;
+      this._engine = "system";
+      this.onVoiceFallback({ reason, stage: 3 });
+      this._speakSystem(chunk, token);
       return;
     }
     // The panel message is deliberately short; the console gets the details

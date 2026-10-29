@@ -892,6 +892,25 @@ test("the start button is visible and clickable in a short window", async (t) =>
   assert.ok(button.inWindow, "the start button is outside the visible window");
   assert.ok(!button.covered, `the start button is covered by ${button.hit}`);
 
+  // The voice test is in the same fixed bar, so it is reachable without
+  // scrolling the panel: further down it could not be found at all.
+  const testButton = await page.evaluate(() => {
+    const btn = document.querySelector("#btnTestVoice");
+    if (!btn) return { missing: true };
+    const rect = btn.getBoundingClientRect();
+    const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return {
+      inWindow: rect.top >= 0 && rect.bottom <= window.innerHeight && rect.width > 0,
+      covered: !(hit === btn || btn.contains(hit)),
+      hit: hit ? `${hit.tagName}.${hit.className}` : "nothing",
+      text: btn.textContent.trim(),
+    };
+  });
+  assert.ok(!testButton.missing, "there is no voice test button");
+  assert.ok(testButton.inWindow, "the voice test button is outside the visible window");
+  assert.ok(!testButton.covered, `the voice test button is covered by ${testButton.hit}`);
+  assert.equal(testButton.text, "Test voice");
+
   // Clicking it (which fails outright when it is covered) starts a reading.
   await page.click("#btnReadRange");
   await page.waitForFunction(() => Boolean(document.querySelector("#textLayer .w.reading")), null, {
@@ -1193,4 +1212,56 @@ test("pages far down the scrolling column are released and drawn again on the wa
     { timeout: 20000 },
   );
   assert.match(await page.textContent('#pageStream .page[data-page="1"] .text-layer'), /Page 1 marker/);
+});
+
+test("a page engine that never starts hands the reading to the system speech service", async (t) => {
+  const sample = await makeSamplePdf();
+  const { server, origin } = await startServer(sample);
+  const browser = await chromium.launch();
+  t.after(async () => {
+    await browser.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const context = await browser.newContext();
+  // The page's speech engine takes every chunk and never says a word.
+  await context.addInitScript(FAKE_TTS, { silent: true });
+  // The system service is a different way in, and its events are shaped
+  // differently, so the handover is exercised for real.
+  await context.addInitScript(() => {
+    const service = {
+      tts: {
+        stop() {},
+        pause() {},
+        resume() {},
+        speak(text, options, callback) {
+          window.__systemSpoken = window.__systemSpoken || [];
+          window.__systemSpoken.push(text);
+          setTimeout(() => options.onEvent({ type: "start" }), 5);
+          setTimeout(() => options.onEvent({ type: "end" }), 15);
+          callback?.();
+        },
+      },
+      runtime: {},
+    };
+    try {
+      window.chrome = service;
+    } catch {
+      Object.defineProperty(window, "chrome", { value: service, configurable: true });
+    }
+  });
+  const page = await context.newPage();
+  await page.goto(`${origin}/src/viewer.html?file=${origin}/sample.pdf`);
+  await page.waitForFunction(() => document.querySelector("#pageTotal")?.textContent === "3", null, {
+    timeout: 20000,
+  });
+  await page.click("#btnReadRange");
+  await page.waitForFunction(() => (window.__systemSpoken?.length ?? 0) > 0, null, { timeout: 60000 });
+  assert.match(await page.evaluate(() => window.__systemSpoken.join(" ")), /Chapter one/);
+  // The handover is announced, rather than the panel looking stuck or failed.
+  assert.match(
+    await page.evaluate(() => document.querySelector("#toast")?.textContent ?? ""),
+    /system's own speech service/i,
+  );
+  assert.doesNotMatch(await page.textContent("#rangeStatus"), /never started/);
 });
