@@ -174,6 +174,13 @@ is remembered for the next document:
   annotation layers, so highlighting, pen, text boxes and erasing work on the page
   you use them on. **Fit to width** fits each page to its own slot.
 
+The thumbnail rail is an overview rather than a second copy of the document:
+the previews are small, the rail has a scrollbar of its own, and whichever page
+is on screen is kept in the middle of it — in both layouts, including while the
+column in **Scroll** is moving. Its scrollbars are real: the rail and the stage
+are bounded by the window, so neither grows until the page itself is taller than
+the screen.
+
 Zoom, rotate, page order and saving behave the same in both layouts.
 
 ## Reading a web page
@@ -335,7 +342,7 @@ Minimal containers may need extra shared libraries and a fontconfig file; see
 
 ```bash
 npm test                # 37 tests: pure logic, PDF bytes and the speech queue
-npm run test:browser    # 16 tests: the viewer page and the settings page
+npm run test:browser    # 17 tests: the viewer page and the settings page
 npm run test:extension  # 2 tests: the loaded extension, PDFs and web pages
 ```
 
@@ -375,7 +382,9 @@ npm run test:extension  # 2 tests: the loaded extension, PDFs and web pages
   continues). Two more cover a voice that begins speaking without ever firing
   `onstart` (the chunk is not spoken twice and nothing is reported), and the
   **Reading** list, which must have a few hundred pixels of its own, scroll
-  itself while following the voice, and be resizable. A further test picks **Word/phrase → end
+  itself while following the voice, and be resizable. Another opens a 20-page
+  document, jumps to page 15 in **Scroll**, and checks the rail scrolled itself so
+  that page is in the middle, fully visible, with a small preview. A further test picks **Word/phrase → end
   of its page**, checks the To field is disabled, and reads from `Beta` to the
   end of page 2 only — then switches back to the plain range and asserts the
   start word is cleared. Another opens

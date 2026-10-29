@@ -835,6 +835,64 @@ test("the reading list has room of its own and scrolls with the voice", async (t
   assert.ok(list.top > 0, "the reading list never followed the voice down");
 });
 
+test("the thumbnail rail keeps the current page in the middle", async (t) => {
+  const sample = await makeLongPdf(20);
+  const { server, origin } = await startServer(sample);
+  const browser = await chromium.launch();
+  t.after(async () => {
+    await browser.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const context = await browser.newContext();
+  await context.addInitScript(FAKE_TTS, 2);
+  const page = await context.newPage();
+
+  await page.goto(`${origin}/src/viewer.html?file=${origin}/sample.pdf`);
+  await page.waitForFunction(() => document.querySelector("#pageTotal")?.textContent === "20", null, {
+    timeout: 20000,
+  });
+  await page.click("#btnViewScroll");
+  await page.waitForFunction(() => document.querySelectorAll("#pageStream .page").length === 20, null, {
+    timeout: 15000,
+  });
+
+  await page.fill("#pageInput", "15");
+  await page.press("#pageInput", "Enter");
+  await page.waitForFunction(() => document.querySelector(".thumb.current")?.dataset.page === "15", null, {
+    timeout: 15000,
+  });
+  await page.waitForFunction(
+    () => {
+      const canvas = document.querySelector(".thumb.current canvas");
+      return Boolean(canvas && canvas.width > 0);
+    },
+    null,
+    { timeout: 15000 },
+  );
+
+  const geometry = await page.evaluate(() => {
+    const rail = document.querySelector("#thumbs");
+    const card = document.querySelector(".thumb.current");
+    const railRect = rail.getBoundingClientRect();
+    const cardRect = card.getBoundingClientRect();
+    return {
+      offset: cardRect.top + cardRect.height / 2 - (railRect.top + railRect.height / 2),
+      visible: cardRect.top >= railRect.top - 1 && cardRect.bottom <= railRect.bottom + 1,
+      scrollTop: rail.scrollTop,
+      previewWidth: card.querySelector("canvas").width,
+    };
+  });
+
+  assert.ok(geometry.scrollTop > 0, "the rail did not follow the page that is shown");
+  assert.ok(geometry.visible, "the current page is outside the visible part of the rail");
+  assert.ok(
+    Math.abs(geometry.offset) < 60,
+    `the current page sits ${Math.round(geometry.offset)}px from the middle of the rail`,
+  );
+  assert.ok(geometry.previewWidth <= 120, `the preview is ${geometry.previewWidth}px wide`);
+});
+
 test("the layout toggle stacks every page and keeps the page number in step", async (t) => {
   const sample = await makeSamplePdf();
   const { server, origin } = await startServer(sample);

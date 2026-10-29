@@ -1021,6 +1021,22 @@ function updatePageUi() {
   for (const thumb of ui.thumbs.querySelectorAll(".thumb")) {
     thumb.classList.toggle("current", Number(thumb.dataset.page) === state.pageNumber);
   }
+  centreThumb(state.pageNumber);
+}
+
+/**
+ * Keep the page on screen in the middle of the thumbnail rail. The rail is its
+ * own scroller: without this the highlight walks off the bottom of it while the
+ * document is scrolled, leaving no overview of where you are.
+ */
+function centreThumb(pageNumber) {
+  const card = ui.thumbs.querySelector(`.thumb[data-page="${pageNumber}"]`);
+  if (!card) return;
+  const wanted = card.offsetTop + card.offsetHeight / 2 - ui.thumbs.clientHeight / 2;
+  const max = Math.max(0, ui.thumbs.scrollHeight - ui.thumbs.clientHeight);
+  const next = clamp(wanted, 0, max);
+  if (Math.abs(ui.thumbs.scrollTop - next) < 2) return;
+  ui.thumbs.scrollTop = next;
 }
 
 function setZoom(delta) {
@@ -1037,11 +1053,20 @@ function setZoom(delta) {
 /* ------------------------------------------------------------------ */
 
 let thumbObserver = null;
+let thumbResize = null;
 
 function buildThumbs() {
   thumbToken++;
   const token = thumbToken;
   if (thumbObserver) thumbObserver.disconnect();
+  // Previews are drawn lazily and change height as they arrive, which moves the
+  // page being read away from the middle of the rail; follow them.
+  if (thumbResize) thumbResize.disconnect();
+  thumbResize = typeof ResizeObserver === "undefined"
+    ? null
+    : new ResizeObserver(() => {
+        if (state.doc) centreThumb(state.pageNumber);
+      });
   ui.thumbs.replaceChildren();
 
   thumbObserver = new IntersectionObserver((entries) => {
@@ -1119,6 +1144,7 @@ function buildThumbs() {
 
     ui.thumbs.append(card);
     thumbObserver.observe(card);
+    thumbResize?.observe(card);
   });
 
   updatePageUi();
@@ -1134,7 +1160,9 @@ async function renderThumb(card, token) {
     const extra = state.rotations[original] ?? 0;
     const rotation = (((page.rotate ?? 0) + extra) % 360 + 360) % 360;
     const base = page.getViewport({ scale: 1, rotation });
-    const scale = Math.min(1, 150 / base.width);
+    // A small preview: the rail is an overview, and smaller pages mean more of
+    // them fit around the one being read.
+    const scale = Math.min(1, 104 / base.width);
     const vp = page.getViewport({ scale, rotation });
     const canvas = document.createElement("canvas");
     canvas.width = Math.max(1, Math.floor(vp.width));
