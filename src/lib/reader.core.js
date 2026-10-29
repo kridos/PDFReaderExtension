@@ -83,6 +83,9 @@ class Reader {
     this.voiceURI = "";
     this._token = 0;
     this._current = null;
+    // How far into the current chunk the voice has reached, so a speed change
+    // can carry on from that word instead of starting the sentence again.
+    this._cursor = 0;
     this._keepAlive = [];
     this._starved = false;
     // When the queue was last cancelled; Chrome can drop an utterance that is
@@ -124,6 +127,7 @@ class Reader {
     this.chunks = range.chunks ?? [];
     this.open = Boolean(range.open);
     this.index = 0;
+    this._cursor = 0;
     this._starved = false;
     this._voiceStage = 0;
     this._failedVoiceURI = "";
@@ -198,6 +202,45 @@ class Reader {
     if (this.state === "playing") this.pause();
     else if (this.state === "paused") this.resume();
     else this.play();
+  }
+
+  /**
+   * Change the speaking speed. A speech engine fixes the rate when a sentence is
+   * queued, so a sentence already being spoken is queued again from the word it
+   * had reached: the change is heard now, not after the current sentence.
+   */
+  setRate(rate) {
+    const next = Math.min(10, Math.max(0.1, Number(rate) || 1));
+    if (next === this.rate) return;
+    this.rate = next;
+    if (this.state === "playing") this._restartCurrent();
+  }
+
+  /** Speak the rest of the current chunk again, from the word it had reached. */
+  _restartCurrent() {
+    const chunk = this.chunks[this.index];
+    if (!chunk) return;
+    const from = Math.max(0, Math.min(this._cursor, chunk.text.length - 1));
+    this._token++;
+    this._current = null;
+    this._cancelledAt = Date.now();
+    try {
+      window.speechSynthesis.cancel();
+    } catch {
+      // A missing engine is reported when the next chunk fails to start.
+    }
+    if (Reader.systemTts) {
+      try {
+        Reader.systemTts.stop();
+      } catch {
+        // Nothing was playing through the system service.
+      }
+    }
+    this._cursor = from;
+    this._setState("playing");
+    const token = this._token;
+    if (this._engine === "system") this._speakSystem(chunk, token, from);
+    else this._startUtterance(chunk, token, this._voiceStage, 0, from);
   }
 
   stop() {
@@ -322,8 +365,8 @@ class Reader {
    * Queue one chunk. `stage` picks the voice: 0 the chosen (or default) voice,
    * 1 a voice installed on this machine, 2 the browser default, 3 no retry.
    */
-  _startUtterance(chunk, token, stage = 0, attempt = 0) {
-    const utter = new SpeechSynthesisUtterance(chunk.text);
+  _startUtterance(chunk, token, stage = 0, attempt = 0, from = 0) {
+    const utter = new SpeechSynthesisUtterance(chunk.text.slice(from));
     utter.rate = Math.min(10, Math.max(0.1, this.rate));
     utter.pitch = Math.min(2, Math.max(0, this.pitch));
     utter.volume = Math.min(1, Math.max(0, this.volume));
@@ -395,7 +438,8 @@ class Reader {
       started = true;
       stopWatchdog();
       armStall();
-      this.onProgress({ absolute: chunk.start, chunkIndex: this.index, chunk });
+      this._cursor = from;
+      this.onProgress({ absolute: chunk.start + from, chunkIndex: this.index, chunk });
     };
     // Chrome can take an utterance and then report nothing at all — no start,
     // no end, no error — so the engine itself is asked whether it has picked
@@ -444,8 +488,9 @@ class Reader {
       began();
       armStall();
       const offset = typeof event.charIndex === "number" ? event.charIndex : 0;
+      this._cursor = from + offset;
       this.onProgress({
-        absolute: chunk.start + offset,
+        absolute: chunk.start + from + offset,
         chunkIndex: this.index,
         chunk,
       });
@@ -455,6 +500,7 @@ class Reader {
       heard = true;
       stopTimers();
       if (stale()) return;
+      this._cursor = 0;
       this.index++;
       this._speakCurrent();
     };
@@ -500,7 +546,7 @@ class Reader {
    * error, each with a message rather than an error code — and it plays the
    * system default voice, which is the point: it is a different way in.
    */
-  _speakSystem(chunk, token) {
+  _speakSystem(chunk, token, from = 0) {
     const tts = Reader.systemTts;
     if (!tts) {
       this._setState("idle");
@@ -534,7 +580,8 @@ class Reader {
       started = true;
       clearTimeout(watchdog);
       armStall();
-      this.onProgress({ absolute: chunk.start, chunkIndex: this.index, chunk });
+      this._cursor = from;
+      this.onProgress({ absolute: chunk.start + from, chunkIndex: this.index, chunk });
     };
     watchdog = setTimeout(() => {
       if (stale() || started || failed) return;
@@ -556,9 +603,11 @@ class Reader {
         begin();
         armStall();
         const offset = typeof event.charIndex === "number" ? event.charIndex : 0;
-        this.onProgress({ absolute: chunk.start + offset, chunkIndex: this.index, chunk });
+        this._cursor = from + offset;
+        this.onProgress({ absolute: chunk.start + from + offset, chunkIndex: this.index, chunk });
       } else if (type === "end") {
         clear();
+        this._cursor = 0;
         this.index++;
         this._speakCurrent();
       } else if (type === "error") {
@@ -579,7 +628,7 @@ class Reader {
     try {
       tts.stop();
       tts.speak(
-        chunk.text,
+        chunk.text.slice(from),
         {
           enqueue: false,
           rate: Math.min(10, Math.max(0.1, this.rate)),

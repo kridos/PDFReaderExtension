@@ -120,10 +120,12 @@ reaches it.
 **Reading order.** A PDF's content stream does not have to draw a line left to
 right, or one line at a time: headers, footnotes and italic runs are often written
 at the end of the page. Text used to be taken in the order it was drawn, which put
-words out of place in the reading list and in the voice. Runs that share a
-baseline are now gathered into their line and read left to right, while the order
-in which lines and blocks were drawn is kept, so columns and side notes stay
-together. Right-to-left text keeps the order it was drawn in. Invisible junk that
+words out of place in the reading list and in the voice. Runs are now gathered
+into the line they are drawn on and read left to right, and the lines themselves
+are put into reading order by position — top to bottom, and on a page laid out in
+columns, one column at a time from the left. A line that spans the columns (a
+heading or a footer) is read on its own, between the columns above and below it.
+Right-to-left text keeps the order it was drawn in. Invisible junk that
 some producers leave behind — control characters and private-use glyph slots — is
 dropped as well, since some engines refuse an utterance containing them and then
 make no sound at all. The status line shows `Reading · 4 of 40 pages loaded` as it goes,
@@ -133,10 +135,13 @@ word has no up-front duration estimate; the real word count appears in the statu
 line when the reading finishes.
 
 While reading, the current word is highlighted in the page text and the viewer
-turns pages automatically. The **Reading** list shows the sentences as they are
+turns pages automatically. A word hyphenated over a line break is one word to the
+voice and two runs on the page; both halves are highlighted together. The **Reading** list shows the sentences as they are
 spoken and can be clicked to jump to one. **Stop**, play/pause and the speed
 slider are in the same panel; voice, speed and pitch live in [Settings](#settings).
-Speed runs from 0.5× to 8×, and changes take effect from the next sentence.
+Speed runs from 0.5× to 8×, and a change is heard straight away: the speech engine
+fixes the rate when a sentence is queued, so the rest of the sentence being spoken
+is queued again at the new speed from the word it had reached.
 Chrome's own voices vary above roughly 3×: some keep going cleanly, others turn
 buzzy or stop getting faster, so try the range on the voice you use.
 

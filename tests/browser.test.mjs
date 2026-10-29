@@ -56,6 +56,16 @@ async function makeLongPdf(pageCount = 30) {
   return new Uint8Array(await doc.save());
 }
 
+/** A word hyphenated over a line break: one word to the voice, two runs on the page. */
+async function makeHyphenatedPdf() {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const page = doc.addPage([612, 792]);
+  page.drawText("The exam-", { x: 72, y: 720, size: 14, font });
+  page.drawText("ple continues here.", { x: 72, y: 700, size: 14, font });
+  return new Uint8Array(await doc.save());
+}
+
 async function startServer(sample) {
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://127.0.0.1");
@@ -1264,4 +1274,70 @@ test("a page engine that never starts hands the reading to the system speech ser
     /system's own speech service/i,
   );
   assert.doesNotMatch(await page.textContent("#rangeStatus"), /never started/);
+});
+
+test("a word hyphenated over a line break is highlighted on both lines", async (t) => {
+  const sample = await makeHyphenatedPdf();
+  const { server, origin } = await startServer(sample);
+  const browser = await chromium.launch();
+  t.after(async () => {
+    await browser.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const context = await browser.newContext();
+  // Speaks the sentence and reports one boundary, at the joined word, so the
+  // highlight stays there long enough to be inspected.
+  await context.addInitScript(() => {
+    class FakeUtterance {
+      constructor(text) {
+        this.text = text;
+      }
+    }
+    window.SpeechSynthesisUtterance = FakeUtterance;
+    const synth = {
+      speaking: false,
+      paused: false,
+      pending: false,
+      getVoices: () => [{ name: "Test voice", lang: "en-US", voiceURI: "test-voice", localService: true }],
+      addEventListener() {},
+      removeEventListener() {},
+      cancel() {
+        this.current = null;
+        this.speaking = false;
+      },
+      pause() {
+        this.paused = true;
+      },
+      resume() {
+        this.paused = false;
+      },
+      speak(utterance) {
+        this.current = utterance;
+        this.speaking = true;
+        utterance.onstart?.();
+        // "The example …": index 4 is the joined word.
+        setTimeout(() => utterance.onboundary?.({ name: "word", charIndex: 4 }), 20);
+      },
+    };
+    Object.defineProperty(window, "speechSynthesis", { value: synth, configurable: true });
+  });
+  const page = await context.newPage();
+  await page.goto(`${origin}/src/viewer.html?file=${origin}/sample.pdf`);
+  await page.waitForFunction(() => document.querySelector("#pageTotal")?.textContent === "1", null, {
+    timeout: 20000,
+  });
+  await page.click("#btnReadRange");
+  await page.waitForFunction(() => document.querySelectorAll("#textLayer .w.reading").length === 2, null, {
+    timeout: 15000,
+  });
+  const parts = await page.evaluate(() => {
+    const words = [...document.querySelectorAll("#textLayer .w.reading")];
+    return words.map((el) => ({ text: el.textContent, top: el.getBoundingClientRect().top }));
+  });
+  assert.deepEqual(parts.map((part) => part.text), ["exam", "ple"]);
+  assert.ok(
+    Math.abs(parts[0].top - parts[1].top) > 8,
+    `both halves were highlighted on one line: ${JSON.stringify(parts)}`,
+  );
 });

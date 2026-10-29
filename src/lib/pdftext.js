@@ -114,15 +114,118 @@ function groupLines(runs) {
     if (run.hasEOL) line.closed = true;
   }
 
-  // Lines in the order they first appeared, and each line read from left to
-  // right. Vertical movement is left to whatever order the page drew blocks in,
-  // which keeps columns and side notes together.
-  lines.sort((a, b) => a.order - b.order);
+  // Each line read from left to right, then the lines themselves put into
+  // reading order. A baseline that carries two columns is split first.
+  const ordered = [];
   for (const line of lines) {
-    if (line.runs.some((run) => RTL.test(run.str))) line.runs.sort((a, b) => a.order - b.order);
-    else line.runs.sort((a, b) => a.x - b.x || a.order - b.order);
+    if (line.runs.some((run) => RTL.test(run.str))) {
+      line.runs.sort((a, b) => a.order - b.order);
+      ordered.push(line);
+    } else {
+      ordered.push(...splitBaseline(line));
+    }
   }
-  return lines;
+  return orderLines(ordered);
+}
+
+/**
+ * Cut one baseline into the pieces that are far apart: text in the next column
+ * shares a baseline with the column beside it, and the stream may have written
+ * either column first, so the runs are put in x order and then cut where the gap
+ * is far wider than a word space. Each piece is a line of its own.
+ */
+function splitBaseline(line) {
+  const runs = [...line.runs].sort((a, b) => a.x - b.x || a.order - b.order);
+  const pieces = [];
+  let piece = null;
+  let reach = -Infinity;
+  for (const run of runs) {
+    if (!piece || run.x - reach > Math.max(run.fontSize * 1.5, 18)) {
+      piece = { y: line.y, closed: line.closed, order: run.order, runs: [] };
+      pieces.push(piece);
+    }
+    piece.runs.push(run);
+    reach = Math.max(reach, run.x + advance(run));
+  }
+  return pieces;
+}
+
+/** Horizontal extent of a line, in text-space units. */
+function lineSpan(line) {
+  let x0 = Infinity;
+  let x1 = -Infinity;
+  for (const run of line.runs) {
+    x0 = Math.min(x0, run.x);
+    x1 = Math.max(x1, run.x + advance(run));
+  }
+  return { x0, x1 };
+}
+
+/**
+ * Vertical gutters: x positions that no line on the page covers. Text on both
+ * sides of one is laid out in columns.
+ */
+function findGutters(spans) {
+  const left = Math.min(...spans.map((span) => span.x0));
+  const right = Math.max(...spans.map((span) => span.x1));
+  const minGap = Math.max(8, (right - left) * 0.04);
+  const byLeft = [...spans].sort((a, b) => a.x0 - b.x0);
+  const gutters = [];
+  let reach = byLeft[0].x1;
+  for (const span of byLeft.slice(1)) {
+    if (span.x0 - reach >= minGap) gutters.push((reach + span.x0) / 2);
+    reach = Math.max(reach, span.x1);
+  }
+  return gutters;
+}
+
+/** One band of column text, read column by column from the left. */
+function orderBand(band, gutters) {
+  // One more column than there are gutters between them.
+  const columns = Array.from({ length: gutters.length + 1 }, () => []);
+  for (const item of band) {
+    const centre = (item.span.x0 + item.span.x1) / 2;
+    columns[gutters.filter((at) => centre > at).length].push(item.line);
+  }
+  return columns
+    .filter((column) => column.length)
+    .flatMap((column) => column.sort((a, b) => b.y - a.y || a.x - b.x || a.order - b.order));
+}
+
+/**
+ * Put a page's lines into reading order: top to bottom, and on a page laid out
+ * in columns, one column at a time from the left. The content stream's order is
+ * not a reading order — a producer may write a footnote, heading or whole
+ * paragraph before the line above it — so position decides, and the stream's
+ * order only breaks ties. A line that spans the columns (a heading or a footer)
+ * is read on its own, between the columns above and below it.
+ */
+function orderLines(lines) {
+  if (lines.length < 2) return [...lines];
+  const spans = new Map(lines.map((line) => [line, lineSpan(line)]));
+  const topDown = [...lines].sort((a, b) => b.y - a.y || a.x - b.x || a.order - b.order);
+  const gutters = findGutters([...spans.values()]);
+  if (!gutters.length) return topDown;
+
+  const out = [];
+  let band = [];
+  const flush = () => {
+    if (!band.length) return;
+    out.push(...orderBand(band, gutters));
+    band = [];
+  };
+  for (const line of topDown) {
+    const span = spans.get(line);
+    const crosses = gutters.some((at) => span.x0 < at && span.x1 > at);
+    if (crosses) {
+      flush();
+      out.push(line);
+    } else {
+      band.push({ line, span });
+    }
+  }
+  flush();
+  return out;
 }
 
 /**

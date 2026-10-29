@@ -1846,10 +1846,11 @@ async function followReading(absolute) {
 
 function highlightWord(view, rawOffset) {
   if (!view.wordMap.length) return;
-  let previous = view.textLayer.querySelector(".w.reading");
-  if (previous) previous.classList.remove("reading");
+  for (const previous of view.textLayer.querySelectorAll(".w.reading")) {
+    previous.classList.remove("reading");
+  }
 
-  let found = null;
+  let index = -1;
   let low = 0;
   let high = view.wordMap.length - 1;
   while (low <= high) {
@@ -1858,17 +1859,24 @@ function highlightWord(view, rawOffset) {
     if (rawOffset < entry.start) high = mid - 1;
     else if (rawOffset >= entry.end) low = mid + 1;
     else {
-      found = entry;
+      index = mid;
       break;
     }
   }
-  if (!found) found = view.wordMap[clamp(low, 0, view.wordMap.length - 1)];
+  // A word hyphenated over a line break is one word to the voice but two runs on
+  // the page; the page text joins them with no separator, so the pieces that
+  // touch are highlighted together instead of only the one the offset landed in.
+  let first = index >= 0 ? index : clamp(low, 0, view.wordMap.length - 1);
+  let last = first;
+  while (first > 0 && view.wordMap[first - 1].end === view.wordMap[first].start) first--;
+  while (last + 1 < view.wordMap.length && view.wordMap[last].end === view.wordMap[last + 1].start) last++;
+  for (const part of view.wordMap.slice(first, last + 1)) part.el.classList.add("reading");
 
-  found.el.classList.add("reading");
-  const wordRect = found.el.getBoundingClientRect();
+  const anchor = view.wordMap[first].el;
+  const wordRect = anchor.getBoundingClientRect();
   const stageRect = ui.stage.getBoundingClientRect();
   if (wordRect.top < stageRect.top + 32 || wordRect.bottom > stageRect.bottom - 32) {
-    found.el.scrollIntoView({ block: "center", behavior: "smooth" });
+    anchor.scrollIntoView({ block: "center", behavior: "smooth" });
   }
 }
 
@@ -2159,12 +2167,18 @@ function wireEvents() {
   });
 
   ui.rate.addEventListener("input", () => {
+    // The label follows the thumb; the voice is only requeued on release below,
+    // so dragging the slider does not restart the sentence on every pixel.
     state.settings.rate = Number(ui.rate.value);
     ui.rateLabel.textContent = `${Number(ui.rate.value).toFixed(1)}×`;
-    reader.rate = state.settings.rate;
   });
   ui.rate.addEventListener("change", () => {
-    saveSettings({ rate: Number(ui.rate.value) }).catch(() => {});
+    const rate = Number(ui.rate.value);
+    state.settings.rate = rate;
+    // The speech engine fixes the speed when a sentence is queued, so the rest
+    // of the sentence is queued again at the new speed to be heard straight away.
+    reader.setRate(rate);
+    saveSettings({ rate }).catch(() => {});
     scheduleRangePreview();
   });
 

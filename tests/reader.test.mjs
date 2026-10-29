@@ -78,7 +78,11 @@ function makeEngine(voices, speak) {
       engine.paused = false;
     },
     speak(utterance) {
-      engine.said.push({ text: utterance.text, voice: utterance.voice?.voiceURI ?? null });
+      engine.said.push({
+        text: utterance.text,
+        rate: utterance.rate,
+        voice: utterance.voice?.voiceURI ?? null,
+      });
       speak(utterance, engine);
     },
   };
@@ -335,4 +339,31 @@ test("a system speech service that refuses is reported with its reason", async (
 
   assert.deepEqual(errors, ["system-platform error"]);
   assert.equal(reader.state, "idle");
+});
+
+test("a speed change re-speaks the rest of the sentence at the new rate", async (t) => {
+  installClock();
+  t.after(restoreClock);
+  const engine = makeEngine([LOCAL], (utterance, spoken) => {
+    spoken.speaking = true;
+    utterance.onstart?.();
+    // Say only the first word: the rest of the sentence is still to come.
+    globalThis.setTimeout(() => utterance.onboundary?.({ name: "word", charIndex: 4 }), 100);
+  });
+  const Reader = await loadReader(engine);
+  const reader = new Reader();
+  reader.load({ chunks: [{ start: 0, end: 13, text: "one two three" }] });
+  reader.play();
+  // The first sentence is queued a moment after the queue was cleared, and the
+  // first word boundary arrives a little after it starts.
+  advance(400);
+  assert.equal(engine.said.length, 1);
+  assert.equal(engine.said[0].rate, 1);
+
+  reader.setRate(2);
+  advance(300);
+
+  assert.equal(engine.said.length, 2, "the sentence was not queued again");
+  assert.equal(engine.said[1].text, "two three", "it did not carry on from the word it had reached");
+  assert.equal(engine.said[1].rate, 2);
 });

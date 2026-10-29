@@ -120,3 +120,36 @@ test("ligatures and invisible marks are spelled out for the voice", () => {
   assert.equal(raw, "office");
   assert.deepEqual([items[0].start, items[0].end], [0, 6]);
 });
+
+test("lines are read top to bottom even when the page draws them out of order", () => {
+  const { raw } = buildPageText({
+    items: [
+      run("second line", 100, 70, { y: 686 }),
+      run("first line", 100, 60, { y: 700 }),
+    ],
+  });
+  assert.equal(raw, "first line\nsecond line");
+});
+
+test("a page laid out in two columns is read one column at a time", () => {
+  const { raw } = buildPageText({
+    items: [
+      run("right one", 320, 60, { y: 700 }),
+      run("left one", 50, 55, { y: 700 }),
+      run("right two", 320, 60, { y: 686 }),
+      run("left two", 50, 55, { y: 686 }),
+    ],
+  });
+  assert.equal(raw, "left one\nleft two\nright one\nright two");
+});
+
+test("a heading across the columns is read before them", () => {
+  const { raw } = buildPageText({
+    items: [
+      run("left text", 50, 55, { y: 700 }),
+      run("right text", 320, 60, { y: 700 }),
+      run("A Heading Across Both Columns", 50, 300, { y: 740 }),
+    ],
+  });
+  assert.equal(raw, "A Heading Across Both Columns\nleft text\nright text");
+});
