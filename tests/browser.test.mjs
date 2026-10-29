@@ -101,17 +101,34 @@ async function startServer(sample) {
   return { server, origin: `http://127.0.0.1:${port}` };
 }
 
+/** The voices a machine offers unless a test asks for different ones. */
+const VOICES = [{ name: "Test voice", lang: "en-US", voiceURI: "test-voice", localService: true }];
+// Named to sort after the default voice: with no voice chosen the reader uses the
+// first installed voice by name, and this test needs a change to be a change.
+const ALT_VOICE = { name: "Zeta voice", lang: "en-US", voiceURI: "test-voice-2", localService: true };
+
 /**
- * @param {number|{wordDelay?: number, fail?: string, silent?: boolean, failVoice?: string, drop?: number, noStart?: boolean}} options
+ * @param {number|{wordDelay?: number, fail?: string, silent?: boolean, failVoice?: string, drop?: number, noStart?: boolean, voices?: object[]}} options
  *   `fail` makes every utterance error with that reason, `silent` mimics Chrome
  *   swallowing an utterance without any event at all, `drop` swallows only the
  *   first N utterances (the engine-was-busy case), `failVoice` makes only
- *   utterances using that voice fail, and `noStart` speaks without ever firing
- *   onstart (some installed voices do exactly that).
+ *   utterances using that voice fail, `noStart` speaks without ever firing
+ *   onstart (some installed voices do exactly that), and `voices` replaces the
+ *   list of installed voices.
  */
 const FAKE_TTS = (options = {}) => {
   const opts = typeof options === "number" ? { wordDelay: options } : options;
-  const { wordDelay = 25, fail = "", silent = false, failVoice = "", drop = 0, noStart = false } = opts;
+  const {
+    wordDelay = 25,
+    fail = "",
+    silent = false,
+    failVoice = "",
+    drop = 0,
+    noStart = false,
+    // Spelled out here rather than taken from the module: this function is
+    // serialised into the page, where module constants do not exist.
+    voices = [{ name: "Test voice", lang: "en-US", voiceURI: "test-voice", localService: true }],
+  } = opts;
   class FakeUtterance {
     constructor(text) {
       this.text = text;
@@ -122,7 +139,7 @@ const FAKE_TTS = (options = {}) => {
     speaking: false,
     paused: false,
     current: null,
-    getVoices: () => [{ name: "Test voice", lang: "en-US", voiceURI: "test-voice", localService: true }],
+    getVoices: () => voices,
     addEventListener() {},
     removeEventListener() {},
     cancel() {
@@ -172,11 +189,18 @@ const FAKE_TTS = (options = {}) => {
       let i = 0;
       const step = () => {
         if (this.current !== utterance) return;
+        // A paused voice stays exactly where it is until it is resumed.
+        if (this.paused) {
+          setTimeout(step, wordDelay);
+          return;
+        }
         if (i >= positions.length) {
           this.speaking = false;
           utterance.onend?.();
           return;
         }
+        window.__words = window.__words || [];
+        window.__words.push({ text: utterance.text, charIndex: positions[i] });
         utterance.onboundary?.({ name: "word", charIndex: positions[i] });
         i++;
         setTimeout(step, wordDelay);
@@ -1339,5 +1363,190 @@ test("a word hyphenated over a line break is highlighted on both lines", async (
   assert.ok(
     Math.abs(parts[0].top - parts[1].top) > 8,
     `both halves were highlighted on one line: ${JSON.stringify(parts)}`,
+  );
+});
+
+test("a paused reading carries on from its place instead of starting over", async (t) => {
+  const sample = await makeSamplePdf();
+  const { server, origin } = await startServer(sample);
+  const browser = await chromium.launch();
+  t.after(async () => {
+    await browser.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const context = await browser.newContext();
+  await context.addInitScript(FAKE_TTS, 50);
+  const page = await context.newPage();
+
+  await page.goto(`${origin}/src/viewer.html?file=${origin}/sample.pdf`);
+  await page.waitForFunction(() => document.querySelector("#pageTotal")?.textContent === "3", null, {
+    timeout: 20000,
+  });
+  await page.click("#btnReadRange");
+  await page.waitForFunction(() => (window.__words?.length ?? 0) >= 2, null, { timeout: 20000 });
+
+  // Pause with the play button, which used to stay disabled for the whole
+  // reading and left “Start reading” — which begins at the top — as the only way
+  // to hear anything again.
+  await page.click("#btnPlayPause");
+  assert.equal(await page.isDisabled("#btnPlayPause"), false, "play is available while paused");
+  assert.equal(
+    await page.getAttribute("#btnPlayPause", "aria-label"),
+    "Resume from where it stopped (space)",
+  );
+  assert.match(await page.textContent("#rangeStatus"), /^Paused/);
+  assert.equal(await page.textContent("#btnReadRange"), "Start over", "the big button says it starts over");
+
+  const paused = await page.evaluate(() => window.__words.length);
+  await page.waitForTimeout(500);
+  assert.equal(await page.evaluate(() => window.__words.length), paused, "the voice read on while paused");
+
+  await page.click("#btnPlayPause");
+  await page.waitForFunction((count) => window.__words.length > count, paused, { timeout: 10000 });
+  assert.match(await page.textContent("#rangeStatus"), /^Reading/);
+
+  // Resumed, not restarted: the first sentence is not spoken a second time.
+  const spoken = await page.evaluate(() => window.__spoken);
+  assert.equal(
+    spoken.filter((text) => text.startsWith("Chapter one")).length,
+    1,
+    `the reading started over: ${JSON.stringify(spoken)}`,
+  );
+});
+
+test("the voice can be changed while it is reading", async (t) => {
+  const sample = await makeSamplePdf();
+  const { server, origin } = await startServer(sample);
+  const browser = await chromium.launch();
+  t.after(async () => {
+    await browser.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const context = await browser.newContext();
+  await context.addInitScript(FAKE_TTS, { wordDelay: 50, voices: [VOICES[0], ALT_VOICE] });
+  const page = await context.newPage();
+
+  await page.goto(`${origin}/src/viewer.html?file=${origin}/sample.pdf`);
+  await page.waitForFunction(() => document.querySelector("#pageTotal")?.textContent === "3", null, {
+    timeout: 20000,
+  });
+  await page.waitForFunction(() => document.querySelectorAll("#voiceSelect option").length >= 3, null, {
+    timeout: 10000,
+  });
+  await page.click("#btnReadRange");
+  // Far enough into the sentence that the rest is a genuine remainder.
+  await page.waitForFunction(() => (window.__words?.length ?? 0) >= 3, null, { timeout: 20000 });
+
+  const before = await page.evaluate(() => ({
+    said: window.__spoken.length,
+    text: window.__spoken.at(-1),
+    voice: window.__voices.at(-1),
+  }));
+  assert.equal(before.voice, "test-voice", "the reading starts on the installed default voice");
+
+  await page.selectOption("#voiceSelect", "test-voice-2");
+  await page.waitForFunction((count) => (window.__voices ?? []).length > count, before.said, {
+    timeout: 15000,
+  });
+
+  const { spoken, used } = await page.evaluate(() => ({ spoken: window.__spoken, used: window.__voices }));
+  assert.equal(used.at(-1), "test-voice-2", "the new voice is used at once");
+  // The sentence is queued again from the word it had reached, so the new voice
+  // takes over mid-sentence rather than after it.
+  const tail = spoken.at(-1);
+  assert.ok(
+    before.text.length > tail.length && before.text.endsWith(tail),
+    `the rest of the sentence was not re-queued: ${JSON.stringify(spoken)}`,
+  );
+});
+
+test("the invisible text is set in the page's own font, so the highlight covers the word", async (t) => {
+  const doc = await PDFDocument.create();
+  const serif = await doc.embedFont(StandardFonts.TimesRoman);
+  const pdfPage = doc.addPage([612, 792]);
+  pdfPage.drawText("Serif words line up with the ink", { x: 72, y: 700, size: 18, font: serif });
+  const sample = new Uint8Array(await doc.save());
+
+  const { server, origin } = await startServer(sample);
+  const browser = await chromium.launch();
+  t.after(async () => {
+    await browser.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const context = await browser.newContext();
+  await context.addInitScript(FAKE_TTS);
+  const page = await context.newPage();
+
+  await page.goto(`${origin}/src/viewer.html?file=${origin}/sample.pdf`);
+  await page.waitForFunction(() => document.querySelector("#pageTotal")?.textContent === "1", null, {
+    timeout: 20000,
+  });
+  await page.waitForFunction(() => document.querySelectorAll("#textLayer .w").length >= 7, null, {
+    timeout: 20000,
+  });
+
+  const measured = await page.evaluate(() => {
+    const rootRect = document.querySelector("#pageWrap").getBoundingClientRect();
+    const canvas = document.querySelector("#pdfCanvas");
+    const scale = canvas.width / rootRect.width;
+    const pixels = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data;
+    const dark = (x, y) => {
+      const i = (y * canvas.width + x) * 4;
+      return pixels[i] < 160 && pixels[i + 1] < 160 && pixels[i + 2] < 160;
+    };
+    // The fourth word sits in the middle of the line, where a text layer set in
+    // the wrong font has drifted furthest from the glyphs.
+    const word = [...document.querySelectorAll("#textLayer .w")][3];
+    const box = word.getBoundingClientRect();
+    const y0 = Math.max(0, Math.floor((box.top - rootRect.top) * scale));
+    const y1 = Math.min(canvas.height, Math.ceil((box.bottom - rootRect.top) * scale));
+    const x0 = Math.floor((box.left - rootRect.left - 18) * scale);
+    const x1 = Math.ceil((box.right - rootRect.left + 18) * scale);
+    const ink = [];
+    for (let x = Math.max(0, x0); x < x1; x++) {
+      let found = false;
+      for (let y = y0; y < y1 && !found; y++) found = dark(x, y);
+      ink.push(found);
+    }
+    // Letters are a pixel or two apart, words several; the runs are words.
+    const gap = Math.max(4, Math.round(5 * scale));
+    const runs = [];
+    let start = -1;
+    let last = -1;
+    for (let i = 0; i < ink.length; i++) {
+      if (ink[i]) {
+        if (start < 0) start = i;
+        last = i;
+      } else if (start >= 0 && i - last >= gap) {
+        runs.push([start, last + 1]);
+        start = -1;
+      }
+    }
+    if (start >= 0) runs.push([start, last + 1]);
+    const centre = ((box.left + box.right) / 2 - rootRect.left) * scale - Math.max(0, x0);
+    const nearest = runs.sort(
+      (a, b) => Math.abs((a[0] + a[1]) / 2 - centre) - Math.abs((b[0] + b[1]) / 2 - centre),
+    )[0];
+    return {
+      family: getComputedStyle(document.querySelector("#textLayer .ti")).fontFamily,
+      word: word.textContent,
+      ink: nearest ? [nearest[0] + Math.max(0, x0), nearest[1] + Math.max(0, x0)] : null,
+      box: [
+        Math.round((box.left - rootRect.left) * scale),
+        Math.round((box.right - rootRect.left) * scale),
+      ],
+    };
+  });
+
+  assert.match(measured.family, /serif/, `the text layer uses ${measured.family}`);
+  assert.ok(measured.ink, `no ink found near “${measured.word}”`);
+  const [inkLeft, inkRight] = measured.ink;
+  const [boxLeft, boxRight] = measured.box;
+  assert.ok(
+    Math.abs(inkLeft - boxLeft) <= 6 && Math.abs(inkRight - boxRight) <= 6,
+    `highlight box ${boxLeft}..${boxRight} does not cover the ink ${inkLeft}..${inkRight} for “${measured.word}”`,
   );
 });

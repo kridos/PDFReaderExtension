@@ -341,6 +341,55 @@ test("a system speech service that refuses is reported with its reason", async (
   assert.equal(reader.state, "idle");
 });
 
+test("a voice change re-speaks the rest of the sentence with the new voice", async (t) => {
+  installClock();
+  t.after(restoreClock);
+  const engine = makeEngine([LOCAL, NETWORK], (utterance, spoken) => {
+    spoken.speaking = true;
+    utterance.onstart?.();
+    // Only the first word of the sentence has been said so far.
+    globalThis.setTimeout(() => utterance.onboundary?.({ name: "word", charIndex: 4 }), 100);
+  });
+  const Reader = await loadReader(engine);
+  const reader = new Reader();
+  reader.voiceURI = NETWORK.voiceURI;
+  reader.load({ chunks: [{ start: 0, end: 13, text: "one two three" }] });
+  reader.play();
+  advance(400);
+  assert.equal(engine.said.length, 1);
+  assert.equal(engine.said[0].voice, "net-1");
+
+  reader.setVoice(LOCAL.voiceURI);
+  advance(300);
+
+  assert.equal(engine.said.length, 2, "the sentence was not queued again");
+  assert.equal(engine.said[1].text, "two three", "it did not carry on from the word it had reached");
+  assert.equal(engine.said[1].voice, "local-1", "the new voice was not the one used");
+});
+
+test("play after a stop carries on from the word it stopped at", async (t) => {
+  installClock();
+  t.after(restoreClock);
+  const engine = makeEngine([LOCAL], (utterance, spoken) => {
+    spoken.speaking = true;
+    utterance.onstart?.();
+    globalThis.setTimeout(() => utterance.onboundary?.({ name: "word", charIndex: 4 }), 100);
+  });
+  const Reader = await loadReader(engine);
+  const reader = new Reader();
+  reader.load({ chunks: [{ start: 0, end: 13, text: "one two three" }] });
+  reader.play();
+  advance(400);
+  reader.stop();
+  advance(400);
+
+  reader.play();
+  advance(400);
+
+  assert.equal(engine.said.length, 2, "the chunk was not queued again");
+  assert.equal(engine.said[1].text, "two three", "the sentence started over instead of carrying on");
+});
+
 test("a speed change re-speaks the rest of the sentence at the new rate", async (t) => {
   installClock();
   t.after(restoreClock);

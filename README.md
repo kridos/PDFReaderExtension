@@ -135,13 +135,24 @@ word has no up-front duration estimate; the real word count appears in the statu
 line when the reading finishes.
 
 While reading, the current word is highlighted in the page text and the viewer
-turns pages automatically. A word hyphenated over a line break is one word to the
-voice and two runs on the page; both halves are highlighted together. The **Reading** list shows the sentences as they are
-spoken and can be clicked to jump to one. **Stop**, play/pause and the speed
-slider are in the same panel; voice, speed and pitch live in [Settings](#settings).
-Speed runs from 0.5× to 8×, and a change is heard straight away: the speech engine
-fixes the rate when a sentence is queued, so the rest of the sentence being spoken
-is queued again at the new speed from the word it had reached.
+turns pages automatically. The invisible text layer is set in the font family the
+page itself uses and is placed at pdf.js' own baseline, so its letters have the
+same widths as the printed glyphs and the highlight covers the word being spoken —
+including on serif and italic pages, where a generic sans-serif drifted word by
+word along the line. A word hyphenated over a line break is one word to the voice
+and two runs on the page; both halves are highlighted together. The **Reading**
+list shows the sentences as they are spoken and can be clicked to jump to one.
+
+**Pause, and come back to it.** Play/pause (or <kbd>space</kbd>) pauses where it
+is, and the same button resumes from that word: it is enabled for the whole
+reading, so it is the way back in. While paused the status line says so and the
+big button reads **Start over**, which is what it then does; **Stop** ends the
+reading altogether and drops the queue.
+
+The speed slider and the **Voice** list both work while it is speaking. The speech
+engine fixes the speed and the voice when a sentence is queued, so the rest of
+the sentence is queued again from the word it had reached — the change is heard
+immediately rather than after the current sentence. Speed runs from 0.5× to 8×.
 Chrome's own voices vary above roughly 3×: some keep going cleanly, others turn
 buzzy or stop getting faster, so try the range on the voice you use.
 

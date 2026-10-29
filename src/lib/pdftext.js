@@ -75,6 +75,9 @@ function collectRuns(textContent) {
       width: source.width ?? 0,
       height: source.height ?? 0,
       fontSize: Math.hypot(transform[2], transform[3]) || source.height || 10,
+      // Which font drew the run: the viewer uses its family and metrics to put
+      // the invisible text (and the reading highlight) on the same baseline.
+      fontName: source.fontName ?? "",
       hasEOL: Boolean(source.hasEOL),
       order: runs.length,
     });
@@ -254,6 +257,7 @@ export function buildPageText(textContent) {
         width: run.width,
         height: run.height,
         fontSize: run.fontSize,
+        fontName: run.fontName,
         hasEOL: run.hasEOL,
       };
 
@@ -284,5 +288,7 @@ export function buildPageText(textContent) {
   }
 
   if (items.at(-1)?.hasEOL && raw && !raw.endsWith("\n")) raw += "\n";
-  return { raw, items };
+  // `styles` is passed through so the viewer can draw each run in the family
+  // and at the baseline pdf.js reports for it.
+  return { raw, items, styles: textContent.styles ?? {} };
 }

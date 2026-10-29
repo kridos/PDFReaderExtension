@@ -143,6 +143,20 @@ test("a page laid out in two columns is read one column at a time", () => {
   assert.equal(raw, "left one\nleft two\nright one\nright two");
 });
 
+test("each run keeps the font that drew it, and the page keeps its metrics", () => {
+  // The viewer sets the invisible text in this family so its letters sit at the
+  // same widths and baseline as the glyphs painted under it — the reading
+  // highlight is drawn on that text, so this is what keeps it on the words.
+  const styles = { f1: { fontFamily: "serif", ascent: 0.683, descent: -0.217 } };
+  const { items, styles: passed } = buildPageText({
+    items: [{ ...run("Times text", 100, 80), fontName: "f1" }],
+    styles,
+  });
+  assert.equal(items[0].fontName, "f1");
+  assert.deepEqual(passed, styles);
+  assert.deepEqual(buildPageText({ items: [run("no font", 100, 40)] }).styles, {});
+});
+
 test("a heading across the columns is read before them", () => {
   const { raw } = buildPageText({
     items: [

@@ -92,11 +92,34 @@ let thumbToken = 0;
 const pageCache = new Map();
 const textCache = new Map();
 
+let lastReaderState = "idle";
+
 const reader = new Reader({
   onState: (s) => {
     const playing = s === "playing";
+    // Play is the way back into a reading that was paused. Leaving it disabled
+    // for the whole reading made “Start reading”, which begins at the top, look
+    // like the only way to hear anything again.
+    const resumable = playing || s === "paused";
+    ui.playPause.disabled = !resumable;
     ui.playPause.textContent = playing ? "❚❚" : "▶";
-    ui.stop.disabled = s === "idle" || s === "ended";
+    const label = playing
+      ? "Pause (space)"
+      : resumable
+        ? "Resume from where it stopped (space)"
+        : "Play (space)";
+    ui.playPause.title = label;
+    ui.playPause.setAttribute("aria-label", label);
+    ui.stop.disabled = !resumable;
+    // While there is a reading to come back to, the big button starts it over,
+    // and says so.
+    ui.readRange.textContent = resumable ? "Start over" : "Start reading";
+    ui.readRange.title = resumable
+      ? "Read the range again from its beginning"
+      : "Start reading the range below";
+    if (s === "paused") setRangeStatus("Paused — press ▶ to carry on from here.");
+    if (playing && lastReaderState === "paused" && feed) updateReadingStatus(feed);
+    lastReaderState = s;
     if (s === "ended") {
       ui.progressLabel.textContent = "Finished";
       // The summary waits for the voice to drain: the text being loaded is not
@@ -328,14 +351,30 @@ function combine(m1, m2) {
 
 const measureCanvas = document.createElement("canvas");
 const measureCtx = measureCanvas.getContext("2d");
-measureCtx.font = "100px sans-serif";
-const ASCENT = (() => {
+
+/**
+ * The em box of a font as the browser will draw it, in ems. A text-layer span
+ * with `line-height: 1` puts its baseline 0.5 + (ascent − descent)/2 em below
+ * the top of its box — not at a fixed fraction of the size, which is what left
+ * every run a hair above its line and put the reading highlight slightly above
+ * the words.
+ */
+function fontMetrics(family) {
+  measureCtx.font = `100px ${family}`;
   const metrics = measureCtx.measureText("Hxgp");
   const asc = metrics.fontBoundingBoxAscent;
   const desc = metrics.fontBoundingBoxDescent;
-  return asc && asc + desc > 0 ? asc / (asc + desc) : 0.8;
-})();
-function measureWidth(text, sizePx) {
+  if (!asc || !(asc + desc > 0)) return { ascent: 0.8, descent: 0.2 };
+  return { ascent: asc / 100, descent: desc / 100 };
+}
+
+function baselineOffset(family, sizePx) {
+  const { ascent, descent } = fontMetrics(family);
+  return sizePx * (0.5 + (ascent - descent) / 2);
+}
+
+function measureWidth(text, family, sizePx) {
+  measureCtx.font = `100px ${family}`;
   return (measureCtx.measureText(text).width / 100) * sizePx;
 }
 
@@ -854,20 +893,26 @@ function buildTextLayer(view, vp, textData) {
     const fontSize = Math.hypot(matrix[2], matrix[3]);
     if (!fontSize || fontSize < 0.5) continue;
     const angle = Math.atan2(matrix[1], matrix[0]);
+    // pdf.js reports the family the page's font falls back to, so the invisible
+    // text is laid out with the same letter widths as the glyphs under it. A
+    // serif or italic page measured in a generic sans-serif drifts word by word
+    // along the line, and the reading highlight goes with it.
+    const family = textData.styles?.[item.fontName]?.fontFamily || "sans-serif";
 
     const span = document.createElement("span");
     span.className = "ti";
+    span.style.fontFamily = family;
     span.style.fontSize = `${fontSize}px`;
     span.style.left = `${matrix[4]}px`;
     // `matrix[5]` is the baseline already measured down from the top of the
     // page: the viewport transform flips the PDF's y axis. Subtracting it from
     // the page height again mirrored every line, which put the invisible text
     // (and the reading highlight) on the wrong part of the page.
-    span.style.top = `${matrix[5] - fontSize * ASCENT}px`;
+    span.style.top = `${matrix[5] - baselineOffset(family, fontSize)}px`;
 
     let scaleX = 1;
     const desired = item.width * vp.scale;
-    const natural = measureWidth(item.str, fontSize);
+    const natural = measureWidth(item.str, family, fontSize);
     if (desired > 0 && natural > 0) {
       scaleX = clamp(desired / natural, 0.4, 3);
       if (Math.abs(scaleX - 1) < 0.08) scaleX = 1;
@@ -1698,9 +1743,15 @@ async function updateRangePreview() {
 function stopReading() {
   feed = null;
   rangeStatusLocked = false;
+  // Stop ends the reading instead of pausing it: the queue is dropped, so the
+  // play button has nothing to resume and Start reading begins at the top.
+  reader.chunks = [];
+  reader.index = 0;
   reader.stop();
   ui.playPause.textContent = "▶";
+  ui.playPause.disabled = true;
   ui.stop.disabled = true;
+  ui.readRange.textContent = "Start reading";
 }
 
 async function startReading() {
@@ -2183,9 +2234,15 @@ function wireEvents() {
   });
 
   ui.voiceSelect.addEventListener("change", () => {
-    state.settings.voiceURI = ui.voiceSelect.value;
-    reader.voiceURI = ui.voiceSelect.value;
-    saveSettings({ voiceURI: ui.voiceSelect.value }).catch(() => {});
+    const uri = ui.voiceSelect.value;
+    state.settings.voiceURI = uri;
+    // The engine fixes the voice when a sentence is queued, so a change made
+    // while it is speaking queues the rest of the sentence again with the new
+    // voice — the same way the speed slider does.
+    reader.setVoice(uri);
+    saveSettings({ voiceURI: uri }).catch(() => {});
+    const voice = reader.voices.find((v) => v.voiceURI === uri);
+    toast(`Voice: ${voice ? voice.name : "browser default"}.`);
   });
 
   // Selection -> highlight. Page pointers are wired per page by wireView().

@@ -161,7 +161,9 @@ class Reader {
     if (!this.chunks.length) return;
     if (this.state === "paused") return this.resume();
     if (this.state === "playing") return;
-    this._speakCurrent();
+    // Carry on from the word it stopped at: starting again after a stop should
+    // not put the beginning of the sentence back in the queue.
+    this._speakCurrent(this._cursor);
   }
 
   pause() {
@@ -213,6 +215,25 @@ class Reader {
     const next = Math.min(10, Math.max(0.1, Number(rate) || 1));
     if (next === this.rate) return;
     this.rate = next;
+    if (this.state === "playing") this._restartCurrent();
+  }
+
+  /**
+   * Change the voice, mid-sentence included. A speech engine fixes the voice
+   * when a sentence is queued, exactly as it does the speed, so the rest of the
+   * current sentence is queued again from the word it had reached.
+   */
+  setVoice(uri) {
+    const next = String(uri ?? "");
+    if (next === this.voiceURI) return;
+    this.voiceURI = next;
+    // A voice just picked by hand gets a turn even after another one was found
+    // unusable, and is a reason to go back to the page engine after the system
+    // speech service had to take over.
+    this._failedVoiceURI = "";
+    this._voiceStage = 0;
+    this._engine = "web";
+    this._systemTried = false;
     if (this.state === "playing") this._restartCurrent();
   }
 
@@ -344,7 +365,7 @@ class Reader {
     this._startUtterance(chunk, token, stage, attempt);
   }
 
-  _speakCurrent() {
+  _speakCurrent(from = 0) {
     const token = this._token;
     if (this.index >= this.chunks.length) {
       if (this.open) {
@@ -357,8 +378,8 @@ class Reader {
       return;
     }
     const chunk = this.chunks[this.index];
-    if (this._engine === "system") this._speakSystem(chunk, token);
-    else this._startUtterance(chunk, token, 0);
+    if (this._engine === "system") this._speakSystem(chunk, token, from);
+    else this._startUtterance(chunk, token, 0, 0, from);
   }
 
   /**
