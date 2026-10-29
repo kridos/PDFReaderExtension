@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Chrome extension to view, annotate and edit PDFs and read chosen page/word ranges aloud.",
   "scripts": {
-    "test": "node --test tests/range.test.mjs tests/pdftext.test.mjs tests/pdf.test.mjs",
+    "test": "node --test tests/range.test.mjs tests/pdftext.test.mjs tests/pdf.test.mjs tests/reader.test.mjs",
     "test:browser": "node --test tests/browser.test.mjs",
     "test:extension": "node --test tests/extension.test.mjs",
     "icons": "node tools/make-icons.mjs",

@@ -161,7 +161,7 @@ input[type="color"] {
 
 main {
   display: grid;
-  grid-template-columns: 172px minmax(0, 1fr) 336px;
+  grid-template-columns: 172px minmax(0, 1fr) clamp(320px, 30vw, 460px);
   min-height: 0;
 }
 
@@ -185,6 +185,7 @@ main.reader-hidden #readerPanel {
   border-right: none;
   border-left: 1px solid var(--line);
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .panel-head {
@@ -478,6 +479,10 @@ main.reader-hidden #readerPanel {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  /* Squeezes (and scrolls) before the reading list at the bottom does. */
+  flex: 0 1 auto;
+  min-height: 160px;
+  overflow-y: auto;
   border-bottom: 1px solid var(--line);
 }
 
@@ -570,6 +575,7 @@ main.reader-hidden #readerPanel {
 }
 
 .player {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -592,6 +598,7 @@ main.reader-hidden #readerPanel {
 }
 
 .voice-row {
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -602,6 +609,7 @@ main.reader-hidden #readerPanel {
 }
 
 .transcript-head {
+  flex: 0 0 auto;
   display: flex;
   justify-content: space-between;
   padding: 10px 12px 4px;
@@ -612,11 +620,18 @@ main.reader-hidden #readerPanel {
 }
 
 .transcript {
+  /* Scrolls on its own, and the bottom-right corner can be dragged down to
+     give the reading list more room when a document is being followed. */
+  position: relative;
+  flex: 1 1 auto;
   padding: 0 12px 16px;
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-height: 200px;
+  max-height: 55vh;
   overflow-y: auto;
+  resize: vertical;
 }
 
 .transcript p {
@@ -624,11 +639,12 @@ main.reader-hidden #readerPanel {
 }
 
 .transcript .sentence {
-  padding: 4px 6px;
+  padding: 5px 7px;
   border-radius: 5px;
   color: #b8c0d4;
   cursor: pointer;
-  font-size: 12.5px;
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .transcript .sentence:hover {

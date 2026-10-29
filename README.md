@@ -129,20 +129,36 @@ Speed runs from 0.5× to 8×, and changes take effect from the next sentence.
 Chrome's own voices vary above roughly 3×: some keep going cleanly, others turn
 buzzy or stop getting faster, so try the range on the voice you use.
 
+The **Reading** list scrolls on its own and can be made taller by dragging its
+bottom-right corner. While a range is read it follows the voice, keeping the
+sentence being spoken in the middle and leaving the range fields where they are.
+
 **When the voice cannot speak.** Chrome sometimes refuses a sentence outright —
 a voice that is no longer installed, a network voice while offline, or an engine
 left paused by an earlier stop. That used to be silent: the queue ended and the
 panel looked idle with the text sitting in the **Reading** list. Now the status
 line and a toast say what happened, for example `The speech engine could not
 produce sound (synthesis-failed). Pick a different voice in Settings, or slow the
-speed down.` If the voice you picked cannot speak, the sentence is retried on the
-default system voice and reading carries on. A sentence that neither starts nor
-reports an error is spoken again (twice, on a cleared queue), because Chrome
-drops the first utterance after a stop often enough to be worth the retry; only
-if all attempts stay silent is it reported as `did not start` instead of leaving
-the player looking busy. That message includes how many voices the browser lists,
-and the console gets a `[PDF Reader] speech failed` line with the engine state
-(`speaking`/`pending`/`paused`) so a stubborn machine can be diagnosed.
+speed down.`
+
+A chunk is judged by the engine itself, not only by its events. Chrome can take
+an utterance and then report nothing at all — no start, no end, no error — and
+some voices begin speaking without ever firing `onstart`. The queue asks
+`speechSynthesis.speaking` every 250 ms, so speech that has begun is never spoken
+twice, and silence is only believed after five seconds with the engine idle (a
+queued-but-not-started chunk, or a background tab, is given longer still).A chunk the engine swallowed is then spoken again on a cleared queue, twice. An
+engine that does the opposite — claims to be speaking and never reports a word —
+is also started over, after 45 seconds without a single boundary or end event.
+
+If the picked voice still will not start, the sentence moves to a voice installed
+on this machine — a network voice that cannot reach its service behaves exactly
+like a dead engine — and then to the browser default voice if that fails too.
+Only when every one of those stays silent is it reported as `The speech engine
+never started …` instead of leaving the player looking busy. That message
+includes how many voices the browser lists, and the console gets a
+`[PDF Reader] speech failed` line with the engine state
+(`speaking`/`pending`/`paused`) and how many of those voices are installed
+locally, so a stubborn machine can be diagnosed.
 
 ## Page layout
 
@@ -318,18 +334,25 @@ Minimal containers may need extra shared libraries and a fontconfig file; see
 ### Automated
 
 ```bash
-npm test                # 27 tests: pure logic + real PDF bytes (Node only)
-npm run test:browser    # 14 tests: the viewer page and the settings page
+npm test                # 37 tests: pure logic, PDF bytes and the speech queue
+npm run test:browser    # 16 tests: the viewer page and the settings page
 npm run test:extension  # 2 tests: the loaded extension, PDFs and web pages
 ```
 
-- **`npm test`** (`tests/range.test.mjs`, `pdftext.test.mjs`, `pdf.test.mjs`)
-  covers whitespace normalisation and offset maps, case-insensitive anchor
-  search, range errors (missing anchor, inverted pages, empty text), sentence
-  chunking and its offsets, ranges fed one page at a time (it agrees with the
-  all-at-once builder, stops at the end word and never repeats a chunk), text-run
-  joining, and the exporter against real PDF bytes: page order, added rotation,
-  annotation coordinates, annotation text, and WinAnsi sanitising.
+- **`npm test`** (`tests/range.test.mjs`, `pdftext.test.mjs`, `pdf.test.mjs`,
+  `reader.test.mjs`) covers whitespace normalisation and offset maps,
+  case-insensitive anchor search, range errors (missing anchor, inverted pages,
+  empty text), sentence chunking and its offsets, ranges fed one page at a time
+  (it agrees with the all-at-once builder, stops at the end word and never
+  repeats a chunk), text-run joining (tight word gaps, runs split inside a word,
+  words hyphenated over a line break, ligatures and invisible marks), and the
+  exporter against real PDF bytes: page order, added rotation, annotation
+  coordinates, annotation text, and WinAnsi sanitising. `reader.test.mjs` runs the
+  speech queue against a fake engine on a virtual clock, so the watchdogs cost no
+  real time: a voice that starts without announcing itself is not spoken twice, an
+  engine that swallows every chunk is retried three times on the chosen voice and
+  three on an installed one before `did-not-start` is reported, and a chosen voice
+  that never starts hands over to a voice installed on the machine.
 - **`npm run test:browser`** (`tests/browser.test.mjs`) drives `src/viewer.html` in
   Chromium: renders a 3-page PDF, checks the text layer and zoom shortcuts,
   resolves a word-anchored range, verifies reading starts at the anchor and stops
@@ -344,11 +367,15 @@ npm run test:extension  # 2 tests: the loaded extension, PDFs and web pages
   12 and confirms the reading runs on to the last page without reading anything
   before it. Three more cover a speech engine that refuses every utterance (the
   status line and toast must explain why and the player must go back to idle), an
-  engine that accepts an utterance and never reports anything (reported as `did
-  not start` rather than hanging), an engine that swallows only the first
-  utterance (the chunk is spoken again and the reading finishes without an error
-  message), and a chosen voice that cannot speak (the sentence is retried on the
-  default voice and reading continues). A further test picks **Word/phrase → end
+  engine that accepts an utterance and never reports anything (reported as `never
+  started` once every voice has been tried, rather than hanging), an engine that
+  swallows only the first utterance (the chunk is spoken again and the reading
+  finishes without an error message), and a chosen voice that cannot speak (the
+  sentence moves to an installed voice, then to the default, and reading
+  continues). Two more cover a voice that begins speaking without ever firing
+  `onstart` (the chunk is not spoken twice and nothing is reported), and the
+  **Reading** list, which must have a few hundred pixels of its own, scroll
+  itself while following the voice, and be resizable. A further test picks **Word/phrase → end
   of its page**, checks the To field is disabled, and reads from `Beta` to the
   end of page 2 only — then switches back to the plain range and asserts the
   start word is cleared. Another opens

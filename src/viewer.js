@@ -111,8 +111,13 @@ const reader = new Reader({
   },
   onStarved: () => void pumpReading(),
   onError: ({ reason }) => reportSpeechFailure(reason),
-  onVoiceFallback: () =>
-    toast("That voice could not speak here, so the system default voice is being used.", 6000),
+  onVoiceFallback: ({ stage } = {}) =>
+    toast(
+      stage === 2
+        ? "That voice could not speak here, so the browser's default voice is being used instead."
+        : "That voice could not speak here, so a voice installed on this computer is being used instead.",
+      6000,
+    ),
 });
 
 /**
@@ -131,7 +136,9 @@ function reportSpeechFailure(reason) {
   if (!voices) {
     message = "This browser has no voices installed, so nothing can be read aloud. Install a text-to-speech voice in your system settings.";
   } else if (reason === "did-not-start") {
-    message = `The speech engine did not start after a few tries (${voices} voice${voices === 1 ? "" : "s"} found). Pick a different voice in Settings, then press play again.`;
+    message = `The speech engine never started (${voices} voice${voices === 1 ? "" : "s"} found), not even with a voice installed on this machine. Reload the tab, then press play again.`;
+  } else if (reason === "stalled") {
+    message = "The speech engine stopped reporting progress mid-sentence. Press play again, or pick a different voice in Settings.";
   } else if (reason === "not-allowed") {
     message = "The browser blocked speech. Click the page, then press play again.";
   } else if (reason === "synthesis-failed" || reason === "voice-unavailable") {
@@ -1615,7 +1622,15 @@ function appendTranscript(chunks) {
 function updateTranscriptProgress(chunkIndex) {
   transcriptEls.forEach((node, index) => node.classList.toggle("current", index === chunkIndex));
   const active = transcriptEls[chunkIndex];
-  if (active) active.scrollIntoView({ block: "nearest" });
+  if (active) {
+    // Scroll the reading list itself, so following the voice never scrolls the
+    // whole panel and takes the range fields out of reach.
+    const top = active.offsetTop;
+    const bottom = top + active.offsetHeight;
+    if (top < ui.transcript.scrollTop + 4 || bottom > ui.transcript.scrollTop + ui.transcript.clientHeight - 4) {
+      ui.transcript.scrollTop = Math.max(0, top - ui.transcript.clientHeight / 2 + active.offsetHeight / 2);
+    }
+  }
   if (chunkIndex >= 0) ui.progressLabel.textContent = `${chunkIndex + 1} / ${state.chunks.length}`;
 }
 

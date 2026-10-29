@@ -8,9 +8,16 @@
 
 /** How many times one chunk is spoken before the engine is declared broken. */
 const ATTEMPTS = 3;
-/** Long enough for a healthy engine to fire onstart, short enough to retry. */
-const START_TIMEOUT = 1800;
-const RETRY_TIMEOUT = 1000;
+/** How long one chunk may sit in the queue before it is spoken again. */
+const START_GRACE = 5000;
+const RETRY_GRACE = 4000;
+/** How often the engine itself is asked whether it has taken the chunk. */
+const POLL_MS = 250;
+/**
+ * How long an utterance may claim to be speaking without reporting a single
+ * word before the queue decides it is wedged and starts the chunk again.
+ */
+const STALL_TIMEOUT = 45000;
 
 class Reader {
   static get supported() {
@@ -32,7 +39,13 @@ class Reader {
     // Called when the chosen voice could not speak and the default voice took
     // over, so the reader keeps going instead of falling silent.
     this.onVoiceFallback = onVoiceFallback ?? (() => {});
-    this._voiceUnusable = false;
+    // Which voice the queue is reduced to: 0 the chosen (or default) voice,
+    // 1 a voice installed on this machine, 2 the browser default.
+    this._voiceStage = 0;
+    // The voice the last utterance actually used, and the language it speaks.
+    this._usedVoice = "";
+    this._voiceLang = "";
+    this._failedVoiceURI = "";
     this.chunks = [];
     this.index = 0;
     this.state = "idle"; // idle | playing | paused | ended
@@ -86,7 +99,8 @@ class Reader {
     this.open = Boolean(range.open);
     this.index = 0;
     this._starved = false;
-    this._voiceUnusable = false;
+    this._voiceStage = 0;
+    this._failedVoiceURI = "";
     this._setState("idle");
   }
 
@@ -174,13 +188,45 @@ class Reader {
     this.onState(state);
   }
 
+  /** Which voice a chunk should be spoken with. */
+  _stageVoice(stage) {
+    if (stage === 1) return this._localVoice();
+    if (stage === 2) return null;
+    return this._pickVoice();
+  }
+
+  /** The voice the user picked, or null for the browser's default. */
   _pickVoice() {
-    if (!this.voiceURI || this._voiceUnusable) return null;
-    return window.speechSynthesis.getVoices().find((v) => v.voiceURI === this.voiceURI) ?? null;
+    if (!Reader.supported) return null;
+    // A voice the user has just picked gets a turn even after an earlier one was
+    // found unusable: only the voice that failed is skipped.
+    if (this.voiceURI && this.voiceURI !== this._failedVoiceURI) {
+      const voice = window.speechSynthesis.getVoices().find((v) => v.voiceURI === this.voiceURI) ?? null;
+      if (voice) {
+        if (voice.lang) this._voiceLang = voice.lang;
+        return voice;
+      }
+    }
+    if (this._voiceStage === 1) return this._localVoice();
+    return null;
+  }
+
+  /**
+   * A voice installed on this machine, which speaks without a network. Chrome's
+   * default voice is often a network one, and a network voice that cannot reach
+   * its service never starts at all — exactly what a dead engine looks like.
+   */
+  _localVoice() {
+    if (!Reader.supported) return null;
+    const local = window.speechSynthesis.getVoices().filter((voice) => voice.localService);
+    if (!local.length) return null;
+    const base = String(this._voiceLang || "").split("-")[0].toLowerCase();
+    const same = base ? local.find((voice) => String(voice.lang || "").toLowerCase().startsWith(base)) : null;
+    return same ?? local[0];
   }
 
   /** Speak the current chunk again with a fresh utterance on a cleared queue. */
-  _retryUtterance(chunk, token, fallback, attempt) {
+  _retryUtterance(chunk, token, stage, attempt) {
     if (token !== this._token) return;
     // The old utterance is abandoned: its events must no longer move the queue.
     this._current = null;
@@ -190,7 +236,7 @@ class Reader {
     } catch {
       // A missing engine is handled by the caller.
     }
-    this._startUtterance(chunk, token, fallback, attempt);
+    this._startUtterance(chunk, token, stage, attempt);
   }
 
   _speakCurrent() {
@@ -205,19 +251,20 @@ class Reader {
       this._setState("ended");
       return;
     }
-    this._startUtterance(this.chunks[this.index], token, false);
+    this._startUtterance(this.chunks[this.index], token, 0);
   }
 
   /**
-   * Queue one chunk. `fallback` means "speak with the default voice", used when
-   * the voice the user picked turns out to be unusable on this machine.
+   * Queue one chunk. `stage` picks the voice: 0 the chosen (or default) voice,
+   * 1 a voice installed on this machine, 2 the browser default, 3 no retry.
    */
-  _startUtterance(chunk, token, fallback, attempt = 0) {
+  _startUtterance(chunk, token, stage = 0, attempt = 0) {
     const utter = new SpeechSynthesisUtterance(chunk.text);
     utter.rate = Math.min(10, Math.max(0.1, this.rate));
     utter.pitch = Math.min(2, Math.max(0, this.pitch));
     utter.volume = Math.min(1, Math.max(0, this.volume));
-    const voice = fallback ? null : this._pickVoice();
+    const voice = this._stageVoice(stage);
+    this._usedVoice = voice?.voiceURI ?? "";
     if (voice) {
       utter.voice = voice;
       utter.lang = voice.lang;
@@ -231,41 +278,86 @@ class Reader {
     // A retry leaves the previous utterance behind; anything it reports later
     // belongs to a chunk the queue has already moved on from.
     const stale = () => token !== this._token || this._current !== utter;
-    // Chrome can accept an utterance and then never report anything at all:
-    // no start, no end, no error. Speaking the chunk again usually works, so
-    // retry a few times and only then say the engine is refusing to start.
+
+    const engine = window.speechSynthesis;
     let watchdog = 0;
+    let stall = 0;
     const stopWatchdog = () => clearTimeout(watchdog);
-    const armWatchdog = (delay) => {
-      clearTimeout(watchdog);
-      watchdog = setTimeout(() => {
-        if (stale() || started || failed) return;
-        if (this.state !== "playing") return;
-        // A background tab may simply not have got round to it yet.
-        if (typeof document !== "undefined" && document.visibilityState === "hidden") {
-          armWatchdog(delay);
+    const stopStall = () => clearTimeout(stall);
+    const stopTimers = () => {
+      stopWatchdog();
+      stopStall();
+    };
+    // A queue can wedge the other way round too: the engine reports that it is
+    // speaking and then never reports another word. Nothing else would notice, so
+    // a chunk that goes this long without a single event is started over.
+    const armStall = () => {
+      clearTimeout(stall);
+      stall = setTimeout(() => {
+        if (stale() || failed) return;
+        if (this.state !== "playing") {
+          armStall();
           return;
         }
         if (attempt + 1 < ATTEMPTS) {
-          this._retryUtterance(chunk, token, fallback, attempt + 1);
+          this._retryUtterance(chunk, token, stage, attempt + 1);
           return;
         }
         failed = true;
-        this._failUtterance(chunk, token, fallback, "did-not-start", attempt);
-      }, delay);
+        this._failUtterance(chunk, token, stage, "stalled", attempt);
+      }, STALL_TIMEOUT);
     };
-    armWatchdog(attempt ? RETRY_TIMEOUT : START_TIMEOUT);
-
-    utter.onstart = () => {
+    const began = () => {
+      if (started) return;
       started = true;
       stopWatchdog();
-      if (stale()) return;
+      armStall();
       this.onProgress({ absolute: chunk.start, chunkIndex: this.index, chunk });
+    };
+    // Chrome can take an utterance and then report nothing at all — no start,
+    // no end, no error — so the engine itself is asked whether it has picked
+    // the text up. Some voices also begin speaking without ever firing onstart,
+    // which used to look like a refusal and got the chunk spoken again over the
+    // top of the audio that was already playing.
+    const sentAt = Date.now();
+    const grace = attempt ? RETRY_GRACE : START_GRACE;
+    const poll = () => {
+      watchdog = 0;
+      if (stale() || started || failed) return;
+      if (this.state !== "playing") return;
+      if (engine.speaking) {
+        began();
+        return;
+      }
+      // Queued-but-not-yet-started is normal for a busy engine, and a hidden tab
+      // has its timers slowed down. Both are given longer before the chunk is
+      // spoken again: cancelling work that is about to happen is what made a
+      // slow engine look like a broken one.
+      const hidden = typeof document !== "undefined" && document.visibilityState === "hidden";
+      const allowance = hidden ? grace * 4 : engine.pending ? grace * 2 : grace;
+      if (Date.now() - sentAt < allowance) {
+        watchdog = setTimeout(poll, POLL_MS);
+        return;
+      }
+      if (attempt + 1 < ATTEMPTS) {
+        this._retryUtterance(chunk, token, stage, attempt + 1);
+        return;
+      }
+      failed = true;
+      this._failUtterance(chunk, token, stage, "did-not-start", attempt);
+    };
+    watchdog = setTimeout(poll, POLL_MS);
+
+    utter.onstart = () => {
+      if (stale()) return;
+      began();
     };
 
     utter.onboundary = (event) => {
       if (stale()) return;
       if (event.name && event.name !== "word") return;
+      began();
+      armStall();
       const offset = typeof event.charIndex === "number" ? event.charIndex : 0;
       this.onProgress({
         absolute: chunk.start + offset,
@@ -275,20 +367,21 @@ class Reader {
     };
 
     utter.onend = () => {
-      stopWatchdog();
+      stopTimers();
       if (stale()) return;
       this.index++;
       this._speakCurrent();
     };
 
     utter.onerror = (event) => {
-      stopWatchdog();
+      stopTimers();
       const reason = event.error ?? "speech-error";
       if (reason === "interrupted" || reason === "canceled") return;
       if (stale() || failed) return;
       failed = true;
-      // A voice that already started and then broke keeps the text it read.
-      this._failUtterance(chunk, token, fallback || started, reason, attempt);
+      // A voice that already started and then broke keeps the text it read, so
+      // it is not spoken again on another voice (stage 3 means "no retry").
+      this._failUtterance(chunk, token, started ? 3 : stage, reason, attempt);
     };
 
     this._setState("playing");
@@ -301,10 +394,10 @@ class Reader {
         window.speechSynthesis.resume();
         window.speechSynthesis.speak(utter);
       } catch (error) {
-        stopWatchdog();
+        stopTimers();
         if (stale() || failed) return;
         failed = true;
-        this._failUtterance(chunk, token, fallback, error?.message || "speak-failed", attempt);
+        this._failUtterance(chunk, token, stage, error?.message || "speak-failed", attempt);
       }
     };
     // Speaking in the same task as cancel() makes Chrome drop the utterance
@@ -313,12 +406,25 @@ class Reader {
     else speak();
   }
 
-  /** Give up on this utterance, retrying on the default voice once if we can. */
-  _failUtterance(chunk, token, fallback, reason, attempt = 0) {
+  /** Give up on this utterance, trying another voice first if there is one. */
+  _failUtterance(chunk, token, stage, reason, attempt = 0) {
     if (token !== this._token) return;
-    if (!fallback && this.voiceURI && !this._voiceUnusable) {
-      this._voiceUnusable = true;
-      // Start the default voice from a clean queue rather than behind the
+    // The order is: the voice that was asked for, a voice installed on this
+    // machine, then the browser's default. A network voice that cannot reach its
+    // service never starts, and a machine can be left with only that one, so all
+    // three are worth a try.
+    const local = this._localVoice();
+    let next = 0;
+    if (stage === 0) {
+      if (local && local.voiceURI !== this._usedVoice) next = 1;
+      else if (this.voiceURI && this._usedVoice) next = 2;
+    } else if (stage === 1 && this.voiceURI) {
+      next = 2;
+    }
+    if (next) {
+      this._voiceStage = next;
+      this._failedVoiceURI = this._usedVoice;
+      // Start the alternative from a clean queue rather than behind the
       // utterance the engine just refused.
       this._current = null;
       this._cancelledAt = Date.now();
@@ -327,8 +433,8 @@ class Reader {
       } catch {
         // Nothing to cancel on an engine that is already gone.
       }
-      this.onVoiceFallback({ reason });
-      this._startUtterance(chunk, token, true, 0);
+      this.onVoiceFallback({ reason, stage: next });
+      this._startUtterance(chunk, token, next, 0);
       return;
     }
     // The panel message is deliberately short; the console gets the details
@@ -339,8 +445,10 @@ class Reader {
         reason,
         attempts: attempt + 1,
         voice: this.voiceURI || "(default)",
-        usedDefaultVoice: Boolean(fallback),
+        usedVoice: this._usedVoice,
+        voiceStage: stage,
         voices: engine.getVoices().length,
+        localVoices: engine.getVoices().filter((v) => v.localService).length,
         speaking: engine.speaking,
         pending: engine.pending,
         paused: engine.paused,

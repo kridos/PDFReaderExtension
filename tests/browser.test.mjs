@@ -92,15 +92,16 @@ async function startServer(sample) {
 }
 
 /**
- * @param {number|{wordDelay?: number, fail?: string, silent?: boolean, failVoice?: string, drop?: number}} options
+ * @param {number|{wordDelay?: number, fail?: string, silent?: boolean, failVoice?: string, drop?: number, noStart?: boolean}} options
  *   `fail` makes every utterance error with that reason, `silent` mimics Chrome
  *   swallowing an utterance without any event at all, `drop` swallows only the
- *   first N utterances (the engine-was-busy case), and `failVoice` makes only
- *   utterances using that voice fail.
+ *   first N utterances (the engine-was-busy case), `failVoice` makes only
+ *   utterances using that voice fail, and `noStart` speaks without ever firing
+ *   onstart (some installed voices do exactly that).
  */
 const FAKE_TTS = (options = {}) => {
   const opts = typeof options === "number" ? { wordDelay: options } : options;
-  const { wordDelay = 25, fail = "", silent = false, failVoice = "", drop = 0 } = opts;
+  const { wordDelay = 25, fail = "", silent = false, failVoice = "", drop = 0, noStart = false } = opts;
   class FakeUtterance {
     constructor(text) {
       this.text = text;
@@ -133,7 +134,13 @@ const FAKE_TTS = (options = {}) => {
       window.__voices.push(utterance.voice?.voiceURI ?? null);
       this.current = utterance;
       this.speaking = true;
-      if (silent) return;
+      if (silent) {
+        // Accepted and then forgotten: the engine reports nothing at all and
+        // claims to be doing nothing, which is the "is it hung?" state.
+        this.current = null;
+        this.speaking = false;
+        return;
+      }
       // Nothing at all happens to this utterance: no start, no end, no error.
       if (window.__spoken.length <= drop) {
         this.current = null;
@@ -147,7 +154,7 @@ const FAKE_TTS = (options = {}) => {
         }, 0);
         return;
       }
-      utterance.onstart?.();
+      if (!noStart) utterance.onstart?.();
       const positions = [];
       const re = /\S+/g;
       let match;
@@ -571,14 +578,17 @@ test("an engine that swallows the utterance is reported instead of hanging", asy
   await page.waitForFunction(() => document.querySelector("#pageTotal")?.textContent === "3", null, { timeout: 20000 });
   await page.click("#btnReadRange");
 
-  // No start, no end, no error: exactly the "is it hung?" case.
+  // No start, no end, no error: exactly the "is it hung?" case. Every voice is
+  // tried and every attempt waits five seconds first, so this takes a while.
   await page.waitForFunction(
-    () => /did not start/i.test(document.querySelector("#rangeStatus")?.textContent ?? ""),
+    () => /never started/i.test(document.querySelector("#rangeStatus")?.textContent ?? ""),
     null,
-    { timeout: 15000 },
+    { timeout: 45000 },
   );
   assert.equal(await page.textContent("#btnPlayPause"), "▶");
   assert.equal(await page.isDisabled("#btnStop"), true);
+  const attempts = await page.evaluate(() => window.__spoken?.length ?? 0);
+  assert.equal(attempts, 6, `the chunk should be tried on both voices, not ${attempts} times`);
 });
 
 test("an utterance the engine drops is spoken again instead of being reported", async (t) => {
@@ -661,6 +671,8 @@ test("the range preset decides where a reading starts and stops", async (t) => {
 });
 
 test("a chosen voice that cannot speak falls back to the default voice", async (t) => {
+  // The only installed voice is the chosen one, so the default voice is the next
+  // thing left to try.
   const sample = await makeSamplePdf();
   const { server, origin } = await startServer(sample);
   const browser = await chromium.launch();
@@ -747,6 +759,80 @@ test("empty state and settings page load without errors", async (t) => {
   assert.equal(stored.autoOpenPdf, false);
 
   assert.deepEqual(errors, [], `console errors: ${errors.join(" | ")}`);
+});
+
+test("a voice that never fires a start event is read, not repeated", async (t) => {
+  const sample = await makeSamplePdf();
+  const { server, origin } = await startServer(sample);
+  const browser = await chromium.launch();
+  t.after(async () => {
+    await browser.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const context = await browser.newContext();
+  // The engine takes the text and speaks it, but never reports a start.
+  await context.addInitScript(FAKE_TTS, { wordDelay: 2, noStart: true });
+  const page = await context.newPage();
+  await page.goto(`${origin}/src/viewer.html?file=${origin}/sample.pdf`);
+  await page.waitForFunction(() => document.querySelector("#pageTotal")?.textContent === "3", null, {
+    timeout: 20000,
+  });
+
+  await page.click("#btnReadRange");
+  await page.waitForFunction(
+    () => /^Read \d+ of \d+ pages/.test(document.querySelector("#rangeStatus")?.textContent ?? ""),
+    null,
+    { timeout: 20000 },
+  );
+
+  const status = await page.textContent("#rangeStatus");
+  assert.doesNotMatch(status, /never started|did not start/);
+  const spoken = await page.evaluate(() => window.__spoken.join(" "));
+  assert.match(spoken, /Chapter one/);
+  // A missing start event is not a failure: nothing may be spoken twice.
+  const first = spoken.indexOf("Chapter one");
+  assert.equal(spoken.indexOf("Chapter one", first + 1), -1, `chunk was re-spoken: ${spoken}`);
+});
+
+test("the reading list has room of its own and scrolls with the voice", async (t) => {
+  const sample = await makeLongPdf(60);
+  const { server, origin } = await startServer(sample);
+  const browser = await chromium.launch();
+  t.after(async () => {
+    await browser.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const context = await browser.newContext();
+  await context.addInitScript(FAKE_TTS, { wordDelay: 1 });
+  const page = await context.newPage();
+  await page.goto(`${origin}/src/viewer.html?file=${origin}/sample.pdf`);
+  await page.waitForFunction(() => document.querySelector("#pageTotal")?.textContent === "60", null, {
+    timeout: 20000,
+  });
+
+  const box = await page.evaluate(() => {
+    const el = document.querySelector("#transcript");
+    const style = getComputedStyle(el);
+    return { clientHeight: el.clientHeight, overflowY: style.overflowY, resize: style.resize };
+  });
+  assert.equal(box.overflowY, "auto", "the reading list is not scrollable on its own");
+  assert.equal(box.resize, "vertical", "the reading list cannot be made taller");
+  assert.ok(box.clientHeight >= 180, `the reading list is only ${box.clientHeight}px tall`);
+
+  await page.click("#btnReadRange");
+  await page.waitForFunction(
+    () => /^Read 60 of 60 pages/.test(document.querySelector("#rangeStatus")?.textContent ?? ""),
+    null,
+    { timeout: 40000 },
+  );
+  const list = await page.evaluate(() => {
+    const el = document.querySelector("#transcript");
+    return { top: el.scrollTop, count: el.querySelectorAll(".sentence").length };
+  });
+  assert.ok(list.count > 5, `only ${list.count} sentences were listed`);
+  assert.ok(list.top > 0, "the reading list never followed the voice down");
 });
 
 test("the layout toggle stacks every page and keeps the page number in step", async (t) => {
