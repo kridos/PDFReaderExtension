@@ -115,7 +115,18 @@ page, begins speaking, and parses the next page while the voice is still working
 through the current one, keeping a few sentences queued ahead. A 400-page range
 therefore starts talking almost immediately instead of after every page has been
 extracted, and an end word thousands of pages in costs nothing until reading
-reaches it. The status line shows `Reading · 4 of 40 pages loaded` as it goes,
+reaches it.
+
+**Reading order.** A PDF's content stream does not have to draw a line left to
+right, or one line at a time: headers, footnotes and italic runs are often written
+at the end of the page. Text used to be taken in the order it was drawn, which put
+words out of place in the reading list and in the voice. Runs that share a
+baseline are now gathered into their line and read left to right, while the order
+in which lines and blocks were drawn is kept, so columns and side notes stay
+together. Right-to-left text keeps the order it was drawn in. Invisible junk that
+some producers leave behind — control characters and private-use glyph slots — is
+dropped as well, since some engines refuse an utterance containing them and then
+make no sound at all. The status line shows `Reading · 4 of 40 pages loaded` as it goes,
 and the per-page word cache means a page that has been read once (by reading or
 by paging through it) is instant afterwards. Because of this, a range with no end
 word has no up-front duration estimate; the real word count appears in the status
@@ -132,6 +143,12 @@ buzzy or stop getting faster, so try the range on the voice you use.
 The **Reading** list scrolls on its own and can be made taller by dragging its
 bottom-right corner. While a range is read it follows the voice, keeping the
 sentence being spoken in the middle and leaving the range fields where they are.
+
+**Test** beside the voice list speaks one short sample sentence with the voice
+chosen there, without starting a range and without the page text being involved.
+It separates “this voice cannot speak here” from “the range is wrong”: the status
+line reports that the sample started, the error the engine gave, or that nothing
+started at all within six seconds. Stop a reading before testing.
 
 **When the voice cannot speak.** Chrome sometimes refuses a sentence outright —
 a voice that is no longer installed, a network voice while offline, or an engine
@@ -153,6 +170,19 @@ is also started over, after 45 seconds without a single boundary or end event.
 If the picked voice still will not start, the sentence moves to a voice installed
 on this machine — a network voice that cannot reach its service behaves exactly
 like a dead engine — and then to the browser default voice if that fails too.
+With no voice chosen, an installed voice is tried **first** for the same reason:
+the browser default is often a network voice, and waiting for it to fail delayed
+the first sound by several seconds.
+
+A different failure looks like a full reading list and no audio at all: the
+engine accepts the sentence, reports that it is speaking, and then produces no
+start, no word, no end and no error. Nothing in the platform can say whether
+sound is coming out, so the panel does not cancel anything that might still
+begin — it says what it knows instead. After seven seconds the status line shows
+`No audio yet (N voices found, M installed here)` and a toast suggests checking
+that the tab is not muted and that the system's text-to-speech service is running
+(on Linux, that is speech-dispatcher — `spd-say hello` in a terminal tests it),
+and points at **Test** in the panel.
 Only when every one of those stays silent is it reported as `The speech engine
 never started …` instead of leaving the player looking busy. That message
 includes how many voices the browser lists, and the console gets a

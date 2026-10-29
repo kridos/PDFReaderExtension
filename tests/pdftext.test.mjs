@@ -80,6 +80,41 @@ test("a real hyphen at a line break keeps its break", () => {
   assert.equal(raw, "well-\nKnown");
 });
 
+test("runs drawn out of order are read left to right", () => {
+  // A content stream may place the last word of a line first: the line is put
+  // back together by where the runs sit, not by when they were drawn.
+  const { raw, items } = buildPageText({
+    items: [run("third", 164, 30), run("first", 100, 28), run("second", 132, 28)],
+  });
+  assert.equal(raw, "first second third");
+  assert.deepEqual(items.map((i) => i.str), ["first", "second", "third"]);
+});
+
+test("a run drawn after a later line still belongs to its own line", () => {
+  const { raw } = buildPageText({
+    items: [
+      run("line one", 100, 50, { y: 700 }),
+      run("line two", 100, 50, { y: 686 }),
+      run("tail of one", 160, 50, { y: 700 }),
+    ],
+  });
+  assert.equal(raw, "line one tail of one\nline two");
+});
+
+test("text written right to left keeps the order it was drawn in", () => {
+  const { items } = buildPageText({ items: [run("\u05e9\u05dc\u05d5\u05dd", 140, 30), run("\u05e2\u05d5\u05dc\u05dd", 100, 30)] });
+  assert.deepEqual(
+    items.map((i) => i.str),
+    ["\u05e9\u05dc\u05d5\u05dd", "\u05e2\u05d5\u05dc\u05dd"],
+  );
+});
+
+test("control characters and private-use glyphs never reach the voice", () => {
+  // Some engines refuse an utterance containing these and then make no sound.
+  const { raw } = buildPageText({ items: [run("of\u0000fice\u0007 \ue001works", 100, 60)] });
+  assert.equal(raw, "office works");
+});
+
 test("ligatures and invisible marks are spelled out for the voice", () => {
   const { raw, items } = buildPageText({ items: [run("of\u00ad\ufb01ce", 100, 30)] });
   assert.equal(raw, "office");

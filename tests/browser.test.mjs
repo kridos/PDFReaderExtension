@@ -341,6 +341,20 @@ test("viewer renders, reads a word-anchored range, annotates and saves", async (
   // The range may already have finished reading, disabling Stop mid-flight.
   await page.click("#btnStop", { timeout: 2000 }).catch(() => {});
 
+  // ---- Testing one voice on its own ----
+  // The button speaks a fixed sample, so a voice can be checked without a range
+  // and without the page text being involved at all.
+  await page.evaluate(() => {
+    window.__spoken = [];
+  });
+  await page.click("#btnTestVoice");
+  await page.waitForFunction(() => window.__spoken?.length === 1, null, { timeout: 5000 });
+  assert.match(
+    await page.evaluate(() => window.__spoken[0]),
+    /PDF Reader will read your document aloud/,
+  );
+  assert.match(await page.textContent("#rangeStatus"), /started speaking/);
+
   // ---- Highlighting a selection ----
   await page.fill("#pageInput", "1");
   await page.press("#pageInput", "Enter");

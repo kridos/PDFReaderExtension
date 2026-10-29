@@ -36,6 +36,7 @@ const ui = {
   rate: $("rate"),
   rateLabel: $("rateLabel"),
   voiceSelect: $("voiceSelect"),
+  testVoice: $("btnTestVoice"),
   transcript: $("transcript"),
   progressLabel: $("progressLabel"),
   readerPanel: $("readerPanel"),
@@ -118,12 +119,101 @@ const reader = new Reader({
         : "That voice could not speak here, so a voice installed on this computer is being used instead.",
       6000,
     ),
+  onSilentStart: (info) => noteSilentEngine(info),
 });
 
 /**
- * The speech engine refusing to speak is otherwise invisible: the panel empties
- * its queue and looks idle with no sound and no explanation.
+ * An engine that takes the text and then reports nothing at all is not slow, it
+ * is silent: no start, no word, no end, no error. The platform cannot say
+ * whether sound is coming out, so the panel says what it knows rather than
+ * leaving a full reading list and no audio.
  */
+function noteSilentEngine({ voices = 0, localVoices = 0 } = {}) {
+  setRangeStatus(
+    `No audio yet (${voices} voice${voices === 1 ? "" : "s"} found, ${localVoices} installed here).`,
+    "error",
+  );
+  const linux = /Linux/i.test(navigator.userAgent);
+  toast(
+    `The voice has not started after several seconds${voices ? ` (${voices} voices found, ${localVoices} installed here)` : ""}. ` +
+      "Check the tab is not muted, then that the system's text-to-speech service is running" +
+      (linux ? " — on Linux that is speech-dispatcher; test it in a terminal with “spd-say hello”." : ".") +
+      " Use “Test” beside the voice list to check one voice on its own.",
+    10000,
+  );
+}
+
+/**
+ * Speak one short sentence with the selected voice. The engine is asked for its
+ * own verdict, so a voice can be checked without opening Settings or starting a
+ * whole range — and without the page text being involved at all.
+ */
+function testVoice() {
+  if (!Reader.supported) {
+    setRangeStatus("This browser has no speech synthesis support.", "error");
+    return;
+  }
+  if (reader.state === "playing" || reader.state === "paused") {
+    setRangeStatus("Stop the reading first, then test a voice.", "error");
+    return;
+  }
+  const synth = window.speechSynthesis;
+  const utter = new SpeechSynthesisUtterance("This is how PDF Reader will read your document aloud.");
+  utter.rate = Number(state.settings.rate) || 1;
+  utter.pitch = Number(state.settings.pitch) || 1;
+  const selected = state.settings.voiceURI || "";
+  const voice = reader.voices.find((v) => v.voiceURI === selected);
+  if (voice) {
+    utter.voice = voice;
+    utter.lang = voice.lang;
+  }
+  const label = voice ? voice.name : "the browser default voice";
+  let started = false;
+  utter.onstart = () => {
+    started = true;
+    setRangeStatus(
+      `Testing: ${label} started speaking. If you heard nothing, the tab or the system is muted.`,
+      "ok",
+    );
+  };
+  utter.onend = () => {
+    if (started) setRangeStatus(`Voice test finished: ${label} is working.`, "ok");
+  };
+  utter.onerror = (event) => {
+    const reason = event.error ?? "speech-error";
+    if (reason === "interrupted" || reason === "canceled") return;
+    setRangeStatus(`Voice test failed (${reason}) with ${label}. Try another voice.`, "error");
+  };
+  setRangeStatus(`Testing ${label}…`);
+  // A cancel() in the same task as speak() makes Chrome drop the utterance.
+  synth.cancel();
+  setTimeout(() => {
+    try {
+      synth.resume();
+      synth.speak(utter);
+    } catch (error) {
+      setRangeStatus(`Could not test the voice: ${error.message}`, "error");
+    }
+  }, 150);
+  setTimeout(() => {
+    if (started) return;
+    const voices = synth.getVoices();
+    const local = voices.filter((v) => v.localService).length;
+    setRangeStatus(
+      `The engine accepted the sample but nothing started (${voices.length} voices found, ${local} installed here).`,
+      "error",
+    );
+    console.warn("[PDF Reader] voice test produced no start", {
+      voice: label,
+      voices: voices.length,
+      localVoices: local,
+      speaking: synth.speaking,
+      pending: synth.pending,
+      paused: synth.paused,
+    });
+  }, 6000);
+}
+
 function reportSpeechFailure(reason) {
   // Nothing is being read any more: stop pulling pages in, and keep the status
   // line from being overwritten by a progress update.
@@ -2005,6 +2095,7 @@ function wireEvents() {
   }
 
   ui.readRange.addEventListener("click", startReading);
+  ui.testVoice.addEventListener("click", testVoice);
   ui.stop.addEventListener("click", stopReading);
 
   ui.playPause.addEventListener("click", () => {

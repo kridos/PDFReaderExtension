@@ -144,16 +144,37 @@ test("an engine that swallows every chunk is retried, then reported", async (t) 
   advance(40000);
 
   assert.deepEqual(errors, ["did-not-start"]);
-  // Three tries with the default voice, then three with the installed one.
+  // Three tries with a voice installed here, then three with the browser's
+  // default: the default is often a network voice that cannot speak at all.
   assert.equal(engine.said.length, 6, `said: ${JSON.stringify(engine.said)}`);
   assert.ok(
-    engine.said.slice(0, 3).every((entry) => entry.voice === null),
-    `default voice should have been tried first: ${JSON.stringify(engine.said)}`,
+    engine.said.slice(0, 3).every((entry) => entry.voice === "local-1"),
+    `an installed voice should have been tried first: ${JSON.stringify(engine.said)}`,
   );
   assert.ok(
-    engine.said.slice(3).every((entry) => entry.voice === "local-1"),
-    `an installed voice should have been tried second: ${JSON.stringify(engine.said)}`,
+    engine.said.slice(3).every((entry) => entry.voice === null),
+    `the browser default should have been the last resort: ${JSON.stringify(engine.said)}`,
   );
+});
+
+test("an engine that accepts a chunk and reports nothing is reported as silent", async (t) => {
+  installClock();
+  t.after(restoreClock);
+  const notices = [];
+  const engine = makeEngine([LOCAL], (utterance, spoken) => {
+    // Accepted: the engine says it is speaking, then never says anything else.
+    spoken.speaking = true;
+  });
+  const Reader = await loadReader(engine);
+  const reader = new Reader({ onSilentStart: (info) => notices.push(info) });
+  reader.load({ chunks: [{ start: 0, end: 3, text: "one" }] });
+  reader.play();
+  advance(20000);
+
+  assert.equal(notices.length, 1, "the panel should be told once, not once per poll");
+  assert.equal(notices[0].voices, 1);
+  assert.equal(notices[0].localVoices, 1);
+  assert.equal(engine.said.length, 1, "a chunk that may still speak is not cancelled");
 });
 
 test("an engine that claims to speak but never reports a word is started over", async (t) => {

@@ -1,15 +1,25 @@
-// Turns pdf.js text content into a single string for a page, remembering where
-// every text run starts so the text layer and the reader can map offsets back
-// to rendered words.
+// Turns pdf.js text content into a single string for a page, in reading order,
+// remembering where every text run starts so the text layer and the reader can
+// map offsets back to rendered words.
 
 /** A gap this wide (in ems) between two runs on one line is a word space. */
 const SPACE_GAP = 0.12;
+
+/**
+ * Text written right-to-left must keep the order the page draws it in: sorting
+ * those runs by their left edge would reverse every line.
+ */
+const RTL = /[\u0590-\u05ff\u0600-\u06ff\u0700-\u074f\u0750-\u077f\u08a0-\u08ff\ufb1d-\ufdff\ufe70-\ufeff]/;
 
 /**
  * Make one run safe to speak and to compare. English PDFs are full of ligature
  * glyphs (ﬁ, ﬂ) and invisible marks, and a font that leans or is substituted
  * often leaves both behind; a voice reads "ofﬁce" as a single strange word, so
  * the letters are spelled out instead.
+ *
+ * Control characters and private-use glyph slots are dropped as well: they are
+ * invisible, but some speech engines refuse an utterance that contains them and
+ * then produce no sound at all, which is indistinguishable from a dead engine.
  */
 function cleanRun(text) {
   if (!text) return "";
@@ -17,9 +27,15 @@ function cleanRun(text) {
   // Compatibility forms: ligatures become their letters, full-width and
   // presentation forms become the ordinary characters.
   if (out.normalize) out = out.normalize("NFKC");
-  // Soft hyphens and zero-width marks are invisible, but they split a word for
-  // a speech engine when they survive into the text.
-  return out.replace(/[\u00ad\u200b-\u200d\ufeff\u2060]/g, "");
+  return out
+    // Soft hyphens, zero-width marks, bidi controls and word joiners.
+    .replace(/[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, "")
+    // C0/C1 controls, including the tabs and form feeds some producers leave in.
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "")
+    // Private-use area: symbolic glyph slots with no readable character.
+    .replace(/[\ue000-\uf8ff]/g, "")
+    // A surrogate with no partner cannot be turned into a character at all.
+    .replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, "");
 }
 
 /** How far the run reaches from its origin, in text-space units. */
@@ -38,69 +54,132 @@ function advance(item) {
  * inside a word, which must not be broken apart.
  */
 function separate(prev, next) {
-  const gap = next.transform[4] - (prev.transform[4] + advance(prev));
+  const gap = next.x - (prev.x + advance(prev));
   if (!Number.isFinite(gap) || gap <= 0) return "";
   return gap > next.fontSize * SPACE_GAP ? " " : "";
 }
 
-/**
- * @param {{items: any[]}} textContent
- * @returns {{raw: string, items: {str: string, start: number, end: number, transform: number[], width: number, height: number, hasEOL: boolean}[]}}
- */
-export function buildPageText(textContent) {
-  const items = [];
-  let raw = "";
-  let prev = null;
-  // The previous run ended a line; the break is only written once the next run
-  // shows whether it continues the same word.
-  let pendingBreak = false;
-
+/** Everything with something to say, in the order the page's content stream drew it. */
+function collectRuns(textContent) {
+  const runs = [];
   for (const source of textContent.items ?? []) {
     if (!source || typeof source.str !== "string") continue;
     const str = cleanRun(source.str);
-    if (!str) {
-      if (source.hasEOL) pendingBreak = true;
-      continue;
-    }
+    if (!str) continue;
     const transform = source.transform ?? [1, 0, 0, 1, 0, 0];
-    const fontSize = Math.hypot(transform[2], transform[3]) || source.height || 10;
-    const entry = {
+    runs.push({
       str,
-      start: 0,
-      end: 0,
       transform,
+      x: transform[4],
+      y: transform[5],
       width: source.width ?? 0,
       height: source.height ?? 0,
-      fontSize,
+      fontSize: Math.hypot(transform[2], transform[3]) || source.height || 10,
       hasEOL: Boolean(source.hasEOL),
-    };
+      order: runs.length,
+    });
+  }
+  return runs;
+}
 
-    if (prev) {
-      const sameLine = Math.abs(transform[5] - prev.transform[5]) <= fontSize * 0.5;
-      // "exam-" at the end of one line and "ple" at the start of the next are
-      // one word to a reader, not two; a hyphen before a capital ("well-" then
-      // "Known") is a real hyphen and keeps its break.
-      const brokenWord = /[-\u2010]$/.test(prev.str) && /^\p{Ll}/u.test(str);
-      if ((pendingBreak || !sameLine) && brokenWord) {
-        raw = raw.slice(0, -1);
-        prev.str = prev.str.slice(0, -1);
-        prev.end = raw.length;
-      } else if (pendingBreak || !sameLine) {
-        raw += "\n";
-      } else if (!/\s$/.test(raw) && !/^\s/.test(str)) {
-        raw += separate(prev, entry);
+/**
+ * Group runs into the lines they are actually drawn on. A content stream does
+ * not have to draw a line left to right or one line at a time — headers,
+ * footnotes and italic runs are often written at the end of the stream — and
+ * taking that order as reading order put words out of place. Runs that share a
+ * baseline belong together no matter when they were drawn; a run marked as the
+ * end of a line starts a new one even if the next run is back on the same row.
+ */
+function groupLines(runs) {
+  const lines = [];
+  for (const run of runs) {
+    const tolerance = Math.max(1.5, run.fontSize * 0.5);
+    const previous = lines[lines.length - 1];
+    let line = null;
+    // The stream said this run ends a line, so the next run cannot join it.
+    if (!previous || !previous.closed) {
+      for (const candidate of lines) {
+        if (candidate.closed) continue;
+        if (Math.abs(candidate.y - run.y) <= tolerance) {
+          line = candidate;
+          break;
+        }
       }
     }
-    pendingBreak = false;
-
-    entry.start = raw.length;
-    raw += str;
-    entry.end = raw.length;
-    items.push(entry);
-    prev = entry;
-    if (source.hasEOL) pendingBreak = true;
+    if (!line) {
+      line = { y: run.y, runs: [], closed: false, order: run.order };
+      lines.push(line);
+    }
+    line.runs.push(run);
+    if (run.hasEOL) line.closed = true;
   }
 
-  if (pendingBreak && raw && !raw.endsWith("\n")) raw += "\n";
+  // Lines in the order they first appeared, and each line read from left to
+  // right. Vertical movement is left to whatever order the page drew blocks in,
+  // which keeps columns and side notes together.
+  lines.sort((a, b) => a.order - b.order);
+  for (const line of lines) {
+    if (line.runs.some((run) => RTL.test(run.str))) line.runs.sort((a, b) => a.order - b.order);
+    else line.runs.sort((a, b) => a.x - b.x || a.order - b.order);
+  }
+  return lines;
+}
+
+/**
+ * @param {{items: any[]}} textContent
+ * @returns {{raw: string, items: {str: string, start: number, end: number, transform: number[], x: number, y: number, width: number, height: number, fontSize: number, hasEOL: boolean}[]}}
+ */
+export function buildPageText(textContent) {
+  const lines = groupLines(collectRuns(textContent));
+  const items = [];
+  let raw = "";
+  let prev = null;
+  // The first run of a line needs a break in front of it, but whether that is a
+  // newline or nothing at all (a word hyphenated over the break) depends on the
+  // run that follows.
+  let startsLine = false;
+
+  for (const line of lines) {
+    for (const run of line.runs) {
+      const entry = {
+        str: run.str,
+        start: 0,
+        end: 0,
+        transform: run.transform,
+        x: run.x,
+        y: run.y,
+        width: run.width,
+        height: run.height,
+        fontSize: run.fontSize,
+        hasEOL: run.hasEOL,
+      };
+
+      if (prev) {
+        // "exam-" at the end of one line and "ple" at the start of the next are
+        // one word to a reader, not two; a hyphen before a capital ("well-" then
+        // "Known") is a real hyphen and keeps its break.
+        const brokenWord = startsLine && /[-\u2010]$/.test(prev.str) && /^\p{Ll}/u.test(run.str);
+        if (brokenWord) {
+          raw = raw.slice(0, -1);
+          prev.str = prev.str.slice(0, -1);
+          prev.end = raw.length;
+        } else if (startsLine) {
+          raw += "\n";
+        } else if (!/^\s/.test(run.str) && !/\s$/.test(raw)) {
+          raw += separate(prev, run);
+        }
+      }
+      startsLine = false;
+
+      entry.start = raw.length;
+      raw += entry.str;
+      entry.end = raw.length;
+      items.push(entry);
+      prev = entry;
+    }
+    startsLine = true;
+  }
+
+  if (items.at(-1)?.hasEOL && raw && !raw.endsWith("\n")) raw += "\n";
   return { raw, items };
 }

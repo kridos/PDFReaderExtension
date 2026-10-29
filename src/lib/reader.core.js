@@ -18,6 +18,14 @@ const POLL_MS = 250;
  * word before the queue decides it is wedged and starts the chunk again.
  */
 const STALL_TIMEOUT = 45000;
+/**
+ * How long an accepted chunk may go without a single event — no start, no word,
+ * no end, no error — before the panel says the engine looks dead. Nothing in
+ * the platform reports whether sound is coming out, so this only warns: a slow
+ * voice may still begin, and cancelling it would cost the audio that is on its
+ * way.
+ */
+const SILENT_NOTICE = 7000;
 
 class Reader {
   static get supported() {
@@ -27,7 +35,7 @@ class Reader {
   /**
    * @param {{onState?: (state: string) => void, onProgress?: (p: {absolute: number, chunkIndex: number, chunk: {start: number, end: number, text: string}}) => void, onStarved?: () => void, onError?: (info: {reason: string, chunkIndex: number}) => void, onVoiceFallback?: (info: {reason: string}) => void}} handlers
    */
-  constructor({ onState, onProgress, onStarved, onError, onVoiceFallback } = {}) {
+  constructor({ onState, onProgress, onStarved, onError, onVoiceFallback, onSilentStart } = {}) {
     this.onState = onState ?? (() => {});
     this.onProgress = onProgress ?? (() => {});
     // Called when playback catches up with chunks that have not been supplied
@@ -39,6 +47,10 @@ class Reader {
     // Called when the chosen voice could not speak and the default voice took
     // over, so the reader keeps going instead of falling silent.
     this.onVoiceFallback = onVoiceFallback ?? (() => {});
+    // Called once when the engine took a chunk but never reported anything at
+    // all, which is what a dead system speech service looks like.
+    this.onSilentStart = onSilentStart ?? (() => {});
+    this._silentNotified = false;
     // Which voice the queue is reduced to: 0 the chosen (or default) voice,
     // 1 a voice installed on this machine, 2 the browser default.
     this._voiceStage = 0;
@@ -101,6 +113,7 @@ class Reader {
     this._starved = false;
     this._voiceStage = 0;
     this._failedVoiceURI = "";
+    this._silentNotified = false;
     this._setState("idle");
   }
 
@@ -207,8 +220,11 @@ class Reader {
         return voice;
       }
     }
-    if (this._voiceStage === 1) return this._localVoice();
-    return null;
+    if (this._voiceStage === 2) return null;
+    // With no voice chosen the browser default is not used first: on many
+    // machines it is a network voice, and a network voice that cannot reach its
+    // service never makes a sound. A voice installed here always can.
+    return this._localVoice();
   }
 
   /**
@@ -275,11 +291,14 @@ class Reader {
 
     let started = false;
     let failed = false;
+    // Only a real event counts as the engine having done something.
+    let heard = false;
     // A retry leaves the previous utterance behind; anything it reports later
     // belongs to a chunk the queue has already moved on from.
     const stale = () => token !== this._token || this._current !== utter;
 
     const engine = window.speechSynthesis;
+    let silent = 0;
     let watchdog = 0;
     let stall = 0;
     const stopWatchdog = () => clearTimeout(watchdog);
@@ -287,6 +306,22 @@ class Reader {
     const stopTimers = () => {
       stopWatchdog();
       stopStall();
+      clearTimeout(silent);
+    };
+    const armSilent = () => {
+      clearTimeout(silent);
+      silent = setTimeout(() => {
+        if (heard || failed || stale() || this._silentNotified || this.state !== "playing") return;
+        this._silentNotified = true;
+        const voices = engine.getVoices();
+        this.onSilentStart({
+          voice: this._usedVoice || "(default)",
+          voices: voices.length,
+          localVoices: voices.filter((v) => v.localService).length,
+          speaking: engine.speaking,
+          pending: engine.pending,
+        });
+      }, SILENT_NOTICE);
     };
     // A queue can wedge the other way round too: the engine reports that it is
     // speaking and then never reports another word. Nothing else would notice, so
@@ -350,11 +385,13 @@ class Reader {
 
     utter.onstart = () => {
       if (stale()) return;
+      heard = true;
       began();
     };
 
     utter.onboundary = (event) => {
       if (stale()) return;
+      heard = true;
       if (event.name && event.name !== "word") return;
       began();
       armStall();
@@ -367,6 +404,7 @@ class Reader {
     };
 
     utter.onend = () => {
+      heard = true;
       stopTimers();
       if (stale()) return;
       this.index++;
@@ -374,6 +412,7 @@ class Reader {
     };
 
     utter.onerror = (event) => {
+      heard = true;
       stopTimers();
       const reason = event.error ?? "speech-error";
       if (reason === "interrupted" || reason === "canceled") return;
@@ -400,6 +439,7 @@ class Reader {
         this._failUtterance(chunk, token, stage, error?.message || "speak-failed", attempt);
       }
     };
+    armSilent();
     // Speaking in the same task as cancel() makes Chrome drop the utterance
     // silently; a short pause after cancelling avoids that entirely.
     if (this._cancelledAt && Date.now() - this._cancelledAt < 250) setTimeout(speak, 120);
@@ -417,8 +457,8 @@ class Reader {
     let next = 0;
     if (stage === 0) {
       if (local && local.voiceURI !== this._usedVoice) next = 1;
-      else if (this.voiceURI && this._usedVoice) next = 2;
-    } else if (stage === 1 && this.voiceURI) {
+      else if (this._usedVoice) next = 2;
+    } else if (stage === 1 && this._usedVoice) {
       next = 2;
     }
     if (next) {
